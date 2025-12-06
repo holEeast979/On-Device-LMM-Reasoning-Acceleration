@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Models & Large files
+*.safetensors
+*.bin
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Data
+data/
+AudioCaps*/
+VQAv2*/
+MSVD*/
+
+# Caches
+hf_cache/
+.cache/
+.autodl/
+
+# Logs (optional - remove if you want to track)
+logs/
+
+# Results (optional - remove if you want to track)
+# results/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.temp
+=*

@@ -1,0 +1,22 @@
+# Core
+torch>=2.0.0
+transformers>=4.40.0
+accelerate>=0.25.0
+
+# Vision & Video
+Pillow>=9.0.0
+opencv-python>=4.8.0
+decord>=0.6.0
+
+# Audio
+soundfile>=0.12.0
+librosa>=0.10.0
+
+# Data
+datasets>=2.14.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Utilities
+tqdm>=4.65.0
+huggingface_hub>=0.20.0
