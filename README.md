@@ -77,28 +77,26 @@ pip install -r requirements.txt
 ### Download Models & Data
 
 ```bash
-# Download models (MiniCPM-V, Phi-3.5-Vision)
-python download_models.py
-
-# Download datasets (VQAv2, MSVD-QA, AudioCaps)
-python download_data.py
-
 # Generate data manifests
-python generate_manifests.py
+python tools/generate_manifests.py
+
+# (Optional) prepare/verify video+audio assets
+python tools/prepare_video_audio_data.py
 ```
 
 ### Run Experiments
 
 ```bash
-# Run all experiments
-./run_all.sh
-
-# Or run individual experiments
+# Run individual experiments
 python exp/exp1_modality_bottleneck.py
 python exp/exp2_projection_compare.py
 python exp/exp3_frame_ablation.py
 python exp/exp4_serial_vs_parallel.py
 python exp/exp5_module_profiler.py
+python exp/exp7_video_audio_encode.py
+python exp/exp8_dual_gpu_parallel.py
+python exp/exp9_audio_length_scaling.py
+python exp/exp10_defect_verification.py
 ```
 
 ### Usage: Profiling an LMM
@@ -147,16 +145,22 @@ Total Latency: 1250ms
 
 ```
 ├── common.py                 # Shared utilities and model loaders
-├── run_all.sh                # Main experiment runner
+├── profiling_utils.py        # Shared profiling utilities (timers/monitors/hooks)
 ├── exp/                      # Experiment scripts
 │   ├── exp1_modality_bottleneck.py   # Modality encoding bottleneck analysis
 │   ├── exp2_projection_compare.py    # Q-Former vs MLP comparison
 │   ├── exp3_frame_ablation.py        # Video frame count ablation
 │   ├── exp4_serial_vs_parallel.py    # Serial vs parallel inference
-│   └── exp5_module_profiler.py       # Fine-grained module profiling
-├── download_models.py        # Model download helper
-├── download_data.py          # Dataset download helper
-└── generate_manifests.py     # Data manifest generator
+│   ├── exp5_module_profiler.py       # Fine-grained module profiling
+│   ├── exp7_video_audio_encode.py    # Video+Audio encode latency breakdown
+│   ├── exp8_dual_gpu_parallel.py     # Dual-GPU parallel encode
+│   ├── exp9_audio_length_scaling.py  # Audio length scaling
+│   └── exp10_defect_verification.py  # Defect verification (padding waste + multiturn redundancy)
+├── tools/                    # Data preparation and helper scripts
+│   ├── generate_manifests.py
+│   └── prepare_video_audio_data.py
+└── docs/                     # Notes and documentation
+     └── 12.16 日计划.md
 ```
 
 ---

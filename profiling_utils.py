@@ -151,11 +151,13 @@ class EncoderTimer:
         
         def make_hooks(name):
             def pre_hook(module, input):
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 self._start[name] = time.perf_counter()
             
             def post_hook(module, input, output):
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 elapsed = (time.perf_counter() - self._start[name]) * 1000
                 self.times[name].append(elapsed)
             

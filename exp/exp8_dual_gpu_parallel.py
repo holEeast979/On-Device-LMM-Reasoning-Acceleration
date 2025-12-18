@@ -23,9 +23,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
-
-import common as C
-import profiling_utils as P
 import numpy as np
 import pandas as pd
 import torch
@@ -39,6 +36,8 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
+import common as C
+import profiling_utils as P
 
 # ============ 资源监控 ============
 
