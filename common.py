@@ -351,3 +351,21 @@ def run_qwen25_omni_single(model, proc, content_list: list, question: str, max_n
     clear_gpu_memory()
     
     return out_text, ttft, total, tok_s, t_pack
+
+
+def load_dataset(manifest_path: str, n_samples: int = 50) -> List[Dict]:
+    """加载数据集"""
+    import pandas as pd
+    df = pd.read_csv(manifest_path)
+    
+    samples = []
+    for i, row in df.head(n_samples).iterrows():
+        video_path = row.get("video_path", "")
+        if os.path.exists(video_path):
+            samples.append({
+                "sample_id": row.get("sample_id", f"sample_{i}"),
+                "video_path": video_path,
+                "question": row.get("question", "Describe what you see and hear."),
+            })
+    
+    return samples
