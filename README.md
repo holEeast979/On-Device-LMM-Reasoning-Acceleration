@@ -138,15 +138,10 @@ python benchmark/run.py multiturn --manifest /root/autodl-tmp/data/video_mme/man
 python benchmark/run.py token-prefill --manifest /root/autodl-tmp/data/video_mme/manifest.csv
 
 # Run individual experiments
-python exp/exp1_modality_bottleneck.py
-python exp/exp2_projection_compare.py
-python exp/exp3_frame_ablation.py
-python exp/exp4_serial_vs_parallel.py
-python exp/exp5_module_profiler.py
-python exp/exp7_video_audio_encode.py
-python exp/exp8_dual_gpu_parallel.py
-python exp/exp9_audio_length_scaling.py
-python exp/exp10_defect_verification.py
+python exp/exp1_serial_vs_parallel.py      # Serial vs parallel encoding
+python exp/exp2_ttft_breakdown.py          # TTFT breakdown analysis (core)
+python exp/exp3_dual_gpu_parallel.py       # Dual-GPU parallel encoding
+python exp/exp4_defect_verification.py     # Audio padding + multi-turn defects (core)
 ```
 
 ### Usage: Profiling an LMM
@@ -200,15 +195,10 @@ Total TTFT: 1850ms
 ├── common.py                 # Shared utilities and model loaders
 ├── profiling_utils.py        # Shared profiling utilities (timers/monitors/hooks)
 ├── exp/                      # Experiment scripts
-│   ├── exp1_modality_bottleneck.py   # Modality encoding bottleneck analysis
-│   ├── exp2_projection_compare.py    # Q-Former vs MLP comparison
-│   ├── exp3_frame_ablation.py        # Video frame count ablation
-│   ├── exp4_serial_vs_parallel.py    # Serial vs parallel inference
-│   ├── exp5_module_profiler.py       # Fine-grained module profiling
-│   ├── exp7_video_audio_encode.py    # Video+Audio encode latency breakdown
-│   ├── exp8_dual_gpu_parallel.py     # Dual-GPU parallel encode
-│   ├── exp9_audio_length_scaling.py  # Audio length scaling
-│   └── exp10_defect_verification.py  # Defect verification (padding waste + multiturn redundancy)
+│   ├── exp1_serial_vs_parallel.py    # Serial vs parallel encoding comparison
+│   ├── exp2_ttft_breakdown.py        # TTFT breakdown analysis (core)
+│   ├── exp3_dual_gpu_parallel.py     # Dual-GPU parallel encoding
+│   └── exp4_defect_verification.py   # Audio padding + multi-turn defects (core)
 ├── tools/                    # Data preparation and helper scripts
 │   ├── prepare_video_mme.py
 │   ├── prepare_audiocaps.py

@@ -1,49 +1,48 @@
-# Experiments
+# FasterOmni Experiments
 
-本项目的实验脚本，用于验证 Qwen2.5-Omni 模型的性能瓶颈和优化方向。
+Profiling experiments for identifying performance bottlenecks in Qwen2.5-Omni.
 
-## 实验列表
+## Experiment List
 
-| 实验 | 脚本 | 目的 |
-|------|------|------|
-| Exp1 | `exp1_modality_bottleneck.py` | 模态瓶颈分析：识别视频/音频/文本各模态的处理瓶颈 |
-| Exp2 | `exp2_projection_compare.py` | 投影层对比：比较不同投影策略的效率 |
-| Exp3 | `exp3_frame_ablation.py` | 帧数消融：分析不同帧数对推理时间的影响 |
-| Exp4 | `exp4_serial_vs_parallel.py` | 串行 vs 并行：比较串行和并行处理多模态输入的差异 |
-| Exp5 | `exp5_module_profiler.py` | 模块级 Profiling：细粒度分析各模块耗时 |
-| Exp7 | `exp7_video_audio_encode.py` | 视频/音频编码器分析 |
-| Exp8 | `exp8_dual_gpu_parallel.py` | 双 GPU 并行：跨设备并行推理实验 |
-| Exp9 | `exp9_audio_length_scaling.py` | 音频长度缩放：分析音频时长对处理时间的影响 |
-| Exp10 | `exp10_defect_verification.py` | 缺陷验证：音频 padding 浪费 + 多轮无复用验证 |
+| Exp | Script | Purpose |
+|-----|--------|---------|
+| 1 | `exp1_serial_vs_parallel.py` | Serial vs parallel encoding comparison |
+| 2 | `exp2_ttft_breakdown.py` | **TTFT breakdown analysis (core)** - decompose latency |
+| 3 | `exp3_dual_gpu_parallel.py` | Dual-GPU parallel encoding |
+| 4 | `exp4_defect_verification.py` | **Defect verification (core)** - audio padding + multi-turn |
 
-## 运行方式
+## Running Experiments
 
 ```bash
-# 单独运行某个实验
-python exp/exp1_modality_bottleneck.py
+# Run individual experiments
+python exp/exp2_ttft_breakdown.py          # Core: TTFT breakdown
+python exp/exp4_defect_verification.py     # Core: Defect verification
 
-# 使用统一框架运行 (推荐)
+# Use unified benchmark framework (recommended)
 python benchmark/run.py audio-padding --manifest /path/to/manifest.csv
 python benchmark/run.py multiturn --manifest /path/to/manifest.csv
+python benchmark/run.py ttft-breakdown --manifest /path/to/manifest.csv
 ```
 
-## 输出
+## Output
 
-所有实验结果默认输出到 `/root/autodl-tmp/results/`，包括：
+Results are saved to `/root/autodl-tmp/results/`:
 
-- `*_results.csv`: 原始测量数据
-- `*_summary.csv`: 统计摘要
-- `*.png`: 可视化图表
-- `*.json`: 结构化数据
+- `*_results.csv`: Raw measurement data
+- `*_summary.csv`: Statistical summary
+- `*.png`: Visualization charts
+- `*.json`: Structured data
 
-## 关键发现
+## Key Findings
 
-### 音频 Padding 浪费 (Exp10)
+### Audio Padding "Resource Lock" (Exp4)
 
-- 使用 `padding=max_length` 时，短音频被 padding 到 30s，造成大量计算浪费
-- 使用 `do_not_pad` 可显著降低 audio encoder 耗时
+- `padding=max_length` pads all audio to 30s, causing ~6x compute waste for short clips
+- `do_not_pad` reduces audio encoder latency proportionally to actual audio length
+- Short audio clips consume ~30-40MB extra VRAM purely due to padding
 
-### 多轮无复用 (Exp10)
+### Multi-turn "Groundhog Day" (Exp4)
 
-- 同视频多轮对话时，视频/音频编码器每轮都重新计算
-- 无 KV Cache 复用，导致 prefill 成本重复
+- Same video multi-turn: visual/audio encoders re-run every turn
+- No KV cache reuse, causing redundant prefill computation
+- Turn 2 latency ≈ Turn 1 latency (no speedup)
