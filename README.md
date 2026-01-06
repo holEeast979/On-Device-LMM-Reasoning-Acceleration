@@ -26,6 +26,10 @@ Our profiling on **Qwen2.5-Omni-7B** reveals three structural inefficiencies tha
 
 While existing engines optimize the decoding stage, our breakdown shows that **Preprocess & Encoding dominate the TTFT latency** in multimodal tasks.
 
+<p align="center">
+  <img src="docs/images/ttft_breakdown_preprocess_bar.png" width="600" alt="TTFT Breakdown">
+</p>
+
 - **Fact:** Visual/Audio Encoder + Projector + Glue Code account for **>65% of TTFT**, leaving limited room for Decoder-only optimizations.
 - **Insight:** *"Optimization in the wrong place is futile."*
 
@@ -41,6 +45,10 @@ Whisper-based encoders enforce a **30s padding** (`padding=max_length`), causing
 
 - **Evidence:** A 2s audio clip consumes ~30-40MB extra VRAM purely due to padding, creating a "memory floor" that locks out low-end devices.
 
+<p align="center">
+  <img src="docs/images/audio_padding_peak_allocated_mb.png" width="600" alt="Audio Padding Memory">
+</p>
+
 ### 3. The "Groundhog Day" of Multi-turn Conversation
 
 Native `generate()` pipelines lack cross-turn encoder caching.
@@ -51,6 +59,10 @@ Native `generate()` pipelines lack cross-turn encoder caching.
 | Turn 2 | ❌ Re-run | ❌ Re-run | ❌ Re-run |
 
 - **Observation:** Turn 2 latency ≈ Turn 1 latency. The visual and audio encoders (and their expensive projections) are re-executed for the same video every single turn.
+
+<p align="center">
+  <img src="docs/images/multiturn_bar.png" width="600" alt="Multi-turn Redundancy">
+</p>
 
 ---
 
