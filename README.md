@@ -77,16 +77,21 @@ pip install -r requirements.txt
 ### Download Models & Data
 
 ```bash
-# Generate data manifests
-python tools/generate_manifests.py
-
-# (Optional) prepare/verify video+audio assets
-python tools/prepare_video_audio_data.py
+# Prepare datasets (download/prepare media and generate manifest.csv)
+# NOTE: ActivityNet-QA videos may require downloading via YouTube IDs (optional: --ytdlp)
+python tools/download_datasets.py --dataset video_mme --max-samples 100
+python tools/download_datasets.py --dataset activitynet_qa --max-samples 100
+python tools/download_datasets.py --dataset audiocaps --max-samples 100
 ```
 
 ### Run Experiments
 
 ```bash
+# Unified benchmark runner (spec-based)
+python benchmark/run.py audio-padding --manifest /root/autodl-tmp/data/video_mme/manifest.csv
+python benchmark/run.py multiturn --manifest /root/autodl-tmp/data/video_mme/manifest.csv
+python benchmark/run.py token-prefill --manifest /root/autodl-tmp/data/video_mme/manifest.csv
+
 # Run individual experiments
 python exp/exp1_modality_bottleneck.py
 python exp/exp2_projection_compare.py
@@ -144,6 +149,10 @@ Total Latency: 1250ms
 ## Project Structure
 
 ```
+├── benchmark/                # Unified benchmark framework (runner + specs)
+│   ├── run.py                # CLI entry
+│   ├── runner.py             # Shared runner utilities
+│   └── specs/                # Spec-based experiments (audio-padding/multiturn/token-prefill)
 ├── common.py                 # Shared utilities and model loaders
 ├── profiling_utils.py        # Shared profiling utilities (timers/monitors/hooks)
 ├── exp/                      # Experiment scripts
@@ -157,7 +166,7 @@ Total Latency: 1250ms
 │   ├── exp9_audio_length_scaling.py  # Audio length scaling
 │   └── exp10_defect_verification.py  # Defect verification (padding waste + multiturn redundancy)
 ├── tools/                    # Data preparation and helper scripts
-│   ├── generate_manifests.py
+│   ├── download_datasets.py
 │   └── prepare_video_audio_data.py
 └── docs/                     # Notes and documentation
      └── 12.16 日计划.md
