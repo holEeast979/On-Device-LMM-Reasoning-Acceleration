@@ -45,3 +45,7 @@ Thumbs.db
 *.tmp
 *.temp
 =*
+
+# Local dev files
+.ask_continue_port
+.windsurfrules
