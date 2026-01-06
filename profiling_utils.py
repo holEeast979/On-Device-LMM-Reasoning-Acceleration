@@ -136,6 +136,177 @@ class ResourceMonitor:
         self.markers = []
 
 
+def _bytes_to_mb(n: Optional[int]) -> Optional[float]:
+    if n is None:
+        return None
+    try:
+        return float(n) / (1024.0 * 1024.0)
+    except Exception:
+        return None
+
+
+def _safe_get_rss_bytes() -> Optional[int]:
+    try:
+        import os
+        import psutil
+
+        p = psutil.Process(os.getpid())
+        return int(p.memory_info().rss)
+    except Exception:
+        return None
+
+
+class TorchCudaMemPeakMonitor:
+    """
+    Lightweight sampler that tracks peak torch CUDA memory (allocated/reserved) overall and per phase.
+
+    - Uses sampling (interval) rather than reset_peak_memory_stats to avoid interfering with other profilers.
+    - Phase attribution is best-effort and driven by `mark()` calls (e.g., from module hooks).
+    """
+
+    def __init__(self, *, device: Optional[torch.device] = None, interval_ms: float = 2.0, track_rss: bool = True):
+        self.device = device
+        self.interval_s = float(interval_ms) / 1000.0
+        self.track_rss = bool(track_rss)
+
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._phase = "unknown"
+
+        self.peak_allocated_bytes: int = 0
+        self.peak_reserved_bytes: int = 0
+        self.peak_rss_bytes: int = 0
+        self.phase_peaks: Dict[str, Dict[str, int]] = {}
+
+    def mark(self, phase: str) -> None:
+        with self._lock:
+            self._phase = str(phase)
+
+    def reset(self) -> None:
+        self.peak_allocated_bytes = 0
+        self.peak_reserved_bytes = 0
+        self.peak_rss_bytes = 0
+        self.phase_peaks = {}
+
+    def _get_phase(self) -> str:
+        with self._lock:
+            return str(self._phase)
+
+    def start(self) -> None:
+        if not torch.cuda.is_available():
+            return
+
+        if self.device is None:
+            try:
+                self.device = torch.device("cuda", torch.cuda.current_device())
+            except Exception:
+                self.device = torch.device("cuda", 0)
+
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        assert self.device is not None
+        dev = self.device
+
+        while not self._stop.is_set():
+            try:
+                with torch.cuda.device(dev):
+                    allocated = int(torch.cuda.memory_allocated(dev))
+                    reserved = int(torch.cuda.memory_reserved(dev))
+            except Exception:
+                allocated = 0
+                reserved = 0
+
+            if allocated > self.peak_allocated_bytes:
+                self.peak_allocated_bytes = allocated
+            if reserved > self.peak_reserved_bytes:
+                self.peak_reserved_bytes = reserved
+
+            phase = self._get_phase()
+            pp = self.phase_peaks.get(phase)
+            if pp is None:
+                pp = {"allocated": 0, "reserved": 0, "rss": 0}
+                self.phase_peaks[phase] = pp
+            if allocated > pp["allocated"]:
+                pp["allocated"] = allocated
+            if reserved > pp["reserved"]:
+                pp["reserved"] = reserved
+
+            if self.track_rss:
+                rss = _safe_get_rss_bytes() or 0
+                if rss > self.peak_rss_bytes:
+                    self.peak_rss_bytes = int(rss)
+                if rss > pp["rss"]:
+                    pp["rss"] = int(rss)
+
+            time.sleep(self.interval_s)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def summary_mb(self, *, prefix: str = "") -> Dict[str, Optional[float]]:
+        """
+        Flatten summary with stable keys for CSV rows.
+        """
+        out: Dict[str, Optional[float]] = {
+            f"{prefix}peak_allocated_mb": _bytes_to_mb(self.peak_allocated_bytes),
+            f"{prefix}peak_reserved_mb": _bytes_to_mb(self.peak_reserved_bytes),
+            f"{prefix}peak_rss_mb": _bytes_to_mb(self.peak_rss_bytes) if self.track_rss else None,
+        }
+
+        # Per-phase peaks
+        for phase, pp in sorted(self.phase_peaks.items(), key=lambda kv: kv[0]):
+            safe = str(phase).strip().lower().replace(" ", "_").replace("-", "_")
+            out[f"{prefix}phase_peak_allocated_mb__{safe}"] = _bytes_to_mb(int(pp.get("allocated", 0)))
+            out[f"{prefix}phase_peak_reserved_mb__{safe}"] = _bytes_to_mb(int(pp.get("reserved", 0)))
+            if self.track_rss:
+                out[f"{prefix}phase_peak_rss_mb__{safe}"] = _bytes_to_mb(int(pp.get("rss", 0)))
+        return out
+
+
+class PhaseMarker:
+    """
+    Helper for tagging phases. Intended for use with module hooks.
+    """
+
+    def __init__(self, monitor: TorchCudaMemPeakMonitor, phase: str, *, fallback_phase: str = "generate"):
+        self.monitor = monitor
+        self.phase = str(phase)
+        self.fallback_phase = str(fallback_phase)
+        self._handles = []
+
+    def register(self, module) -> None:
+        def pre_hook(_m, _inp):
+            try:
+                self.monitor.mark(self.phase)
+            except Exception:
+                pass
+
+        def post_hook(_m, _inp, _out):
+            try:
+                self.monitor.mark(self.fallback_phase)
+            except Exception:
+                pass
+
+        h1 = module.register_forward_pre_hook(pre_hook)
+        h2 = module.register_forward_hook(post_hook)
+        self._handles.extend([h1, h2])
+
+    def remove(self) -> None:
+        for h in self._handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._handles = []
+
+
 # ============ Encoder Timer Hook ============
 
 class EncoderTimer:
