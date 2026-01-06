@@ -1,66 +1,72 @@
-# Edge-LMM-Accelerator
+# On-Device LMM Reasoning Acceleration
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Active_Research-yellow)](https://github.com/holEeast979)
 
-> **Accelerating Large Multimodal Models (LMMs) inference on resource-constrained edge devices (Jetson Orin, Raspberry Pi).**
+> **Accelerating Large Multimodal Models (LMMs) inference for video+audio understanding tasks.**
 
 ## Introduction
 
-Running modern Large Multimodal Models (like Qwen2-VL, LLaVA) on edge devices is challenging due to limited memory and compute power. This project aims to bridge the gap between heavy LMMs and accessible hardware.
+This project investigates inference optimization for **Omni-modal LMMs** (video + audio + text), focusing on identifying and addressing performance bottlenecks that existing SOTA methods have not covered.
 
-We focus on **fine-grained profiling**, **architecture analysis**, and **inference optimization** (Quantization, Token Pruning) to achieve real-time multimodal interaction on the edge.
+**Current Model:** Qwen2.5-Omni-7B (will extend to smaller models to validate middleware generalization).
 
-**Hardware Focus:** NVIDIA Jetson Orin / Nano, Consumer GPUs.
+**Datasets:** ActivityNet-QA, Video-MME, AudioCaps.
 
 ---
 
-## Key Findings (So Far)
+## Key Findings (Motivation Experiments)
 
-Based on our benchmarks on **Qwen2-VL**, **Phi-3.5-Vision**, and **BLIP-2**, we have debunked several common assumptions about LMM latency:
+Our profiling on **Qwen2.5-Omni-7B** revealed several inefficiencies **not addressed by existing SOTA optimization methods**:
 
-### 1. The Real Bottleneck is ViT, Not Video Decoding
-Contrary to popular belief, video decoding accounts for only **~18%** of total latency. The **Vision Transformer (ViT) Encoder** is the absolute bottleneck, consuming **92-94%** of inference time in high-resolution settings.
+### 1. Audio Padding Waste
+Whisper-based audio encoders pad all inputs to **30 seconds** (`padding=max_length`), causing significant compute waste for short audio clips.
 
-| Component | Latency Share (Approx.) | Status |
+| Audio Duration | Padding Overhead | Encoder Time |
 | :--- | :--- | :--- |
-| **ViT Encoder** | **92% - 94%** | **Critical Bottleneck** |
-| Video Decoding | 18% | Acceptable |
-| Projection / Merger | < 1% | Negligible |
-| LLM Prefill | ~5% | Fast for short prompts |
+| 5s | 6x | ~500ms |
+| 10s | 3x | ~500ms |
+| 30s | 1x (no waste) | ~500ms |
 
-### 2. Architecture Matters: Q-Former vs. MLP
-For video inference tasks, **Q-Former (BLIP-2 style)** architectures are significantly faster than **MLP (LLaVA style)** architectures due to efficient token compression.
+**Opportunity:** Dynamic padding (`do_not_pad`) reduces audio encoder latency proportionally to actual audio length.
 
-- **Speedup:** **9x faster** (923ms → 105ms).
-- **Trade-off:** Q-Former sacrifices some spatial details but gains massive speed, making it ideal for edge video understanding.
+### 2. Multi-turn KV Cache Not Reused
+In multi-turn conversations on the **same video**, the visual/audio encoders and LLM prefill are **re-executed every turn**, with no KV cache reuse.
 
-### 3. Diminishing Returns of Frame Rate
-Doubling input video frames (e.g., 4 → 8 frames) increases latency by **77%** but yields **negligible accuracy gains** on standard QA benchmarks. This suggests that **Dynamic Key-Frame Extraction** is a superior strategy to uniform sampling.
+| Turn | Visual Encoder | Audio Encoder | LLM Prefill |
+| :--- | :--- | :--- | :--- |
+| Turn 1 | ✅ Run | ✅ Run | ✅ Run |
+| Turn 2 | ❌ Re-run | ❌ Re-run | ❌ Re-run |
+
+**Opportunity:** Cache visual/audio embeddings and KV states across turns.
+
+### 3. Serial Encoding Bottleneck
+Video and audio encoders run **serially**, missing parallelization opportunities on multi-GPU setups.
+
+**Opportunity:** Parallel encoding on separate devices can reduce TTFT significantly.
 
 ---
 
-## Methodology & Features
+## Methodology & Progress
 
-### Phase 1: Fine-Grained Profiling (Completed)
-We developed a non-intrusive profiling tool using **PyTorch Hooks** to dissect the inference timeline without modifying the model source code.
+### Phase 1: Motivation Experiments ✅ (Completed)
+Developed profiling tools and benchmark framework to identify performance gaps in Omni-modal LMMs:
 
-- **Hook-based Timing:** Measures exact execution time of `PatchEmbed`, `Attention`, `MLP`, and `Projector` layers.
-- **Memory Tracking:** Monitors peak VRAM usage per module.
-- **Supported Models:**
-    - [x] Qwen2-VL-7B
-    - [x] Phi-3.5-Vision
-    - [x] LLaVA-v1.5
-    - [x] BLIP-2
+- **Unified Benchmark Framework:** Spec-based runner for reproducible experiments (`benchmark/run.py`)
+- **TTFT Breakdown:** Decomposed Time-To-First-Token into visual/audio encoding, LLM prefill, and decode stages
+- **Defect Verification:** Quantified audio padding waste and multi-turn redundancy
 
-### Phase 2: Optimization (In Progress)
-We are currently implementing the following optimizations to address the ViT bottleneck:
+### Phase 2: Middleware Design (In Progress)
+Designing a lightweight middleware layer to address identified inefficiencies:
 
-- [ ] **FlashAttention Integration:** Porting FlashAttention-2 to edge-compatible kernels to speed up ViT self-attention.
-- [ ] **Token Pruning:** Implementing algorithms (like ToMe) to remove redundant visual tokens early in the forward pass.
-- [ ] **Quantization:** 4-bit/8-bit quantization (AWQ/GPTQ) for running 7B models on 8GB VRAM devices.
+- [ ] **Dynamic Audio Padding:** Adaptive padding based on actual audio duration
+- [ ] **Cross-turn Caching:** Reuse visual/audio embeddings and KV cache across conversation turns
+- [ ] **Parallel Encoding:** Offload video/audio encoders to separate devices
+
+### Phase 3: Generalization Validation (Planned)
+Validate middleware on smaller models (e.g., Qwen2.5-Omni-3B) to ensure generalization.
 
 ---
 
@@ -69,20 +75,31 @@ We are currently implementing the following optimizations to address the ViT bot
 ### Installation
 
 ```bash
-git clone https://github.com/holEeast979/Edge-LMM-Accelerator.git
-cd Edge-LMM-Accelerator
+git clone https://github.com/holEeast979/On-Device-LMM-Reasoning-Acceleration.git
+cd On-Device-LMM-Reasoning-Acceleration
 pip install -r requirements.txt
 ```
 
 ### Download Models & Data
 
 ```bash
-# Prepare datasets (download/prepare media and generate manifest.csv)
-# NOTE: ActivityNet-QA videos may require downloading via YouTube IDs (optional: --ytdlp)
-python tools/download_datasets.py --dataset video_mme --max-samples 100
-python tools/download_datasets.py --dataset activitynet_qa --max-samples 100
-python tools/download_datasets.py --dataset audiocaps --max-samples 100
+# Prepare datasets using dedicated scripts
+# Video-MME (requires yt-dlp for YouTube downloads)
+python tools/prepare_video_mme.py --out-root /root/autodl-tmp/data --max-samples 100 --validate
+
+# ActivityNet-QA
+python tools/generate_activitynet_manifest.py
+
+# AudioCaps (requires audiocaps-download package)
+python tools/prepare_audiocaps.py --out-root /root/autodl-tmp/data --max-samples 100 --validate
 ```
+
+**Dataset Statistics** (current setup):
+| Dataset | Videos/Audios | QA Pairs | Size |
+|---------|---------------|----------|------|
+| Video-MME | 100 videos | 2700 QA | ~12GB |
+| ActivityNet-QA | 103 videos | - | ~1.7GB |
+| AudioCaps | 100 audios | - | ~120MB |
 
 ### Run Experiments
 
@@ -106,41 +123,40 @@ python exp/exp10_defect_verification.py
 
 ### Usage: Profiling an LMM
 
-Use our profiler to analyze your own model's bottleneck:
+Use our profiler to analyze Qwen2.5-Omni's bottleneck:
 
 ```python
-from edge_lmm.profiler import ModelProfiler
-from transformers import Qwen2VLForConditionalGeneration
+from profiling_utils import TorchCudaMemPeakMonitor, Timer
+import common as C
 
 # Load Model
-model = Qwen2VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2-VL-7B-Instruct", 
-    device_map="cuda"
-)
+model, processor = C.load_qwen25_omni("/path/to/Qwen2.5-Omni-7B", dtype="bf16")
 
-# Attach Profiler
-profiler = ModelProfiler(model)
-profiler.start()
+# Attach memory monitor
+mem_monitor = TorchCudaMemPeakMonitor()
+mem_monitor.start()
 
-# Run Inference (Standard HuggingFace code)
-output = model.generate(**inputs)
+# Run inference with timing
+with Timer("generate"):
+    output = model.generate(**inputs)
 
-# Print Report
-profiler.stop()
-profiler.print_summary()
+# Get memory stats
+mem_monitor.stop()
+print(f"Peak GPU memory: {mem_monitor.peak_allocated_bytes / 1e9:.2f} GB")
 ```
 
-**Sample Output:**
+**Sample TTFT Breakdown Output:**
 
 ```
-[Profiler Report]
-Total Latency: 1250ms
+[TTFT Breakdown]
+Total TTFT: 1850ms
 ------------------------------------------------
-| Layer Type    | Time (ms) | % Total |
-|---------------|-----------|---------|
-| ViT Encoder   | 1150.0    | 92.0%   |  <-- BOTTLENECK DETECTED
-| Projector     | 5.0       | 0.4%    |
-| LLM Decoder   | 95.0      | 7.6%    |
+| Stage              | Time (ms) | % Total |
+|--------------------|-----------|---------|
+| Video Encoder      | 850.0     | 45.9%   |
+| Audio Encoder      | 520.0     | 28.1%   |  <-- PADDING WASTE
+| LLM Prefill        | 450.0     | 24.3%   |
+| First Token Decode | 30.0      | 1.6%    |
 ------------------------------------------------
 ```
 
@@ -166,20 +182,25 @@ Total Latency: 1250ms
 │   ├── exp9_audio_length_scaling.py  # Audio length scaling
 │   └── exp10_defect_verification.py  # Defect verification (padding waste + multiturn redundancy)
 ├── tools/                    # Data preparation and helper scripts
-│   ├── download_datasets.py
-│   └── prepare_video_audio_data.py
-└── docs/                     # Notes and documentation
-     └── 12.16 日计划.md
+│   ├── prepare_video_mme.py
+│   ├── prepare_audiocaps.py
+│   ├── prepare_msvd_qa.py
+│   └── datasets/             # Manifest utilities
+└── docs/                     # Documentation
+    ├── benchmark-framework.md
+    ├── dataset-tools.md
+    └── experiments.md
 ```
 
 ---
 
 ## Roadmap
 
-- [x] **Benchmark Platform:** Setup AutoDL/Colab environments for reproducible testing.
-- [x] **Bottleneck Analysis:** Complete profiling for Qwen2-VL and Phi-3.5.
-- [ ] **Optimization MVP:** Implement FlashAttention on Jetson Orin.
-- [ ] **Library Release:** Package the profiler as a standalone pip tool.
+- [x] **Motivation Experiments:** Identify inefficiencies not covered by existing SOTA methods
+- [x] **Benchmark Framework:** Unified spec-based runner for reproducible experiments
+- [x] **Dataset Preparation:** ActivityNet-QA, Video-MME, AudioCaps pipelines
+- [ ] **Middleware Implementation:** Dynamic padding, cross-turn caching, parallel encoding
+- [ ] **Generalization Validation:** Test on smaller models (3B, 1B)
 
 ---
 
