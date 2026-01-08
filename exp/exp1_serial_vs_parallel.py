@@ -18,7 +18,7 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-import common as C
+from utils import common as C
 from transformers.generation.streamers import BaseStreamer
 
 class TokenTimingStreamer(BaseStreamer):

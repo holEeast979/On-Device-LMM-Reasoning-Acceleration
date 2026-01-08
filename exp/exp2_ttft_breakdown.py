@@ -33,8 +33,8 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
-import common as C
-import profiling_utils as P
+from utils import common as C
+from utils import profiling_utils as P
 
 
 # ============ Profiling Utils from profiling_utils.py ============

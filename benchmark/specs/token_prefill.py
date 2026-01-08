@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 
 from benchmark.runner import BenchmarkRunner
-import profiling_utils as P
+from utils import profiling_utils as P
 
 
 SPEC_NAME = "token-prefill"

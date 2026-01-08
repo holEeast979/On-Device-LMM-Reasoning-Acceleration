@@ -149,8 +149,8 @@ python exp/exp4_defect_verification.py     # Audio padding + multi-turn defects 
 Use our profiler to analyze Qwen2.5-Omni's bottleneck:
 
 ```python
-from profiling_utils import TorchCudaMemPeakMonitor, Timer
-import common as C
+from utils.profiling_utils import TorchCudaMemPeakMonitor, Timer
+from utils import common as C
 
 # Load Model
 model, processor = C.load_qwen25_omni("/path/to/Qwen2.5-Omni-7B", dtype="bf16")

@@ -14,7 +14,7 @@ import pandas as pd
 
 from benchmark.runner import BenchmarkRunner, ForwardCounter
 from benchmark.unified_runner import UnifiedRunner
-import profiling_utils as P
+from utils import profiling_utils as P
 
 
 SPEC_NAME = "multiturn"

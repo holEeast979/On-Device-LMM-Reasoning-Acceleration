@@ -13,7 +13,8 @@ import pandas as pd
 
 from benchmark.runner import BenchmarkRunner
 from benchmark.unified_runner import UnifiedRunner
-import profiling_utils as P
+from utils import common as C
+from utils import profiling_utils as P
 
 
 SPEC_NAME = "ttft-breakdown"
