@@ -400,16 +400,28 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
 
 def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
-    """绝对值堆叠条形图"""
-    # 按时长分组取平均
-    grouped = df.groupby(["sample_id", "duration", "category"], dropna=False).agg({
+    """绝对值堆叠条形图 - 按视觉token数排序"""
+    # 检查是否有 visual_tokens 列
+    has_visual_tokens = "visual_tokens" in df.columns
+    
+    # 按样本分组取平均
+    agg_cols = {
         "preprocess_ms": "mean",
         "visual_encoder_ms": "mean",
         "audio_encoder_ms": "mean",
         "llm_prefill_ms": "mean",
         "other_ms": "mean",
         "ttft_ms": "mean",
-    }).reset_index().sort_values("duration")
+        "duration": "first",
+    }
+    if has_visual_tokens:
+        agg_cols["visual_tokens"] = "first"
+    
+    grouped = df.groupby(["sample_id"], dropna=False).agg(agg_cols).reset_index()
+    
+    # 按视觉token数排序（如果有），否则按时长排序
+    sort_col = "visual_tokens" if has_visual_tokens else "duration"
+    grouped = grouped.sort_values(sort_col)
 
     n = len(grouped)
     if n == 0:
@@ -434,13 +446,19 @@ def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
         ax.bar(x, vals, width, bottom=bottom, label=label, color=color)
         bottom += vals
 
-    # X 轴标签
-    labels = [f"{row['duration']:.0f}s\n({row['category']})" for _, row in grouped.iterrows()]
+    # X 轴标签：显示时长和视觉token数
+    if has_visual_tokens:
+        labels = [f"{row['duration']:.0f}s\n({int(row['visual_tokens'])} vtok)" for _, row in grouped.iterrows()]
+        ax.set_xlabel("Video Duration (Visual Tokens)", fontsize=11)
+        ax.set_title("TTFT Breakdown by Visual Tokens\n(Absolute Time, Sorted by Visual Token Count)", fontsize=12)
+    else:
+        labels = [f"{row['duration']:.0f}s" for _, row in grouped.iterrows()]
+        ax.set_xlabel("Video Duration", fontsize=11)
+        ax.set_title("TTFT Breakdown by Video Duration\n(Absolute Time, Individual Cases)", fontsize=12)
+    
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
-    ax.set_xlabel("Video Duration", fontsize=11)
     ax.set_ylabel("TTFT (seconds)", fontsize=11)
-    ax.set_title("TTFT Breakdown by Video Duration\n(Absolute Time, Individual Cases)", fontsize=12)
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(axis='y', alpha=0.3)
 
@@ -452,15 +470,24 @@ def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
 
 
 def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
-    """百分比堆叠条形图（你导师要的那个图）"""
-    grouped = df.groupby(["sample_id", "duration", "category"], dropna=False).agg({
+    """百分比堆叠条形图 - 按视觉token数排序"""
+    has_visual_tokens = "visual_tokens" in df.columns
+    
+    agg_cols = {
         "preprocess_ms": "mean",
         "visual_encoder_ms": "mean",
         "audio_encoder_ms": "mean",
         "llm_prefill_ms": "mean",
         "other_ms": "mean",
         "ttft_ms": "mean",
-    }).reset_index().sort_values("duration")
+        "duration": "first",
+    }
+    if has_visual_tokens:
+        agg_cols["visual_tokens"] = "first"
+    
+    grouped = df.groupby(["sample_id"], dropna=False).agg(agg_cols).reset_index()
+    sort_col = "visual_tokens" if has_visual_tokens else "duration"
+    grouped = grouped.sort_values(sort_col)
 
     n = len(grouped)
     if n == 0:
@@ -491,12 +518,18 @@ def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
         ax.bar(x, vals, width, bottom=bottom, label=label, color=color)
         bottom += vals
 
-    labels = [f"{row['duration']:.0f}s\n({row['category']})" for _, row in grouped.iterrows()]
+    if has_visual_tokens:
+        labels = [f"{row['duration']:.0f}s\n({int(row['visual_tokens'])} vtok)" for _, row in grouped.iterrows()]
+        ax.set_xlabel("Video Duration (Visual Tokens)", fontsize=11)
+        ax.set_title("TTFT Breakdown by Visual Tokens\n(Percentage, Sorted by Visual Token Count)", fontsize=12)
+    else:
+        labels = [f"{row['duration']:.0f}s" for _, row in grouped.iterrows()]
+        ax.set_xlabel("Video Duration", fontsize=11)
+        ax.set_title("TTFT Breakdown by Video Duration\n(Percentage, Individual Cases)", fontsize=12)
+    
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
-    ax.set_xlabel("Video Duration", fontsize=11)
     ax.set_ylabel("Percentage of TTFT (%)", fontsize=11)
-    ax.set_title("TTFT Breakdown by Video Duration\n(Percentage, Individual Cases)", fontsize=12)
     ax.legend(loc="upper right", fontsize=9)
     ax.set_ylim(0, 100)
     ax.grid(axis='y', alpha=0.3)
