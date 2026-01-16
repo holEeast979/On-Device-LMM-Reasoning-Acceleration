@@ -48,6 +48,15 @@ from benchmark.unified_runner import UnifiedRunner
 
 SPEC_NAME = "vllm-comparison"
 
+# 分层采样配置: (min_sec, max_sec, category, count)
+# 总计10个视频，动态帧采样2FPS，5090 32GB安全上限30s(60帧)
+DURATION_BUCKETS = [
+    (5, 12, "tier1", 2),      # 5-12s = 10-24帧
+    (12, 18, "tier2", 3),     # 12-18s = 24-36帧
+    (18, 24, "tier3", 3),     # 18-24s = 36-48帧
+    (24, 32, "tier4", 2),     # 24-32s = 48-64帧
+]
+
 
 def register_subcommand(subparsers, common_parser) -> None:
     p = subparsers.add_parser(
@@ -80,6 +89,12 @@ def register_subcommand(subparsers, common_parser) -> None:
         default=300.0,
         help="Max video duration in seconds for selection (default 5min)"
     )
+    p.add_argument(
+        "--no-stratified",
+        action="store_true",
+        default=False,
+        help="Disable stratified sampling, use random sampling instead"
+    )
     p.set_defaults(_spec_run=run)
 
 
@@ -102,14 +117,19 @@ def get_video_duration_ffprobe(video_path: str) -> float:
 def select_videos(
     args: argparse.Namespace,
     runner: BenchmarkRunner,
-    max_duration: float = 300.0,
+    max_duration: float = 32.0,
 ) -> List[Dict[str, Any]]:
-    """选择视频样本"""
+    """
+    分层采样选择视频样本
+    
+    按时长分桶，每个桶内随机采样指定数量，确保覆盖不同时长段
+    """
     if not os.path.exists(str(args.manifest)):
         raise SystemExit(f"manifest not found: {args.manifest}")
 
     all_rows = runner.load_manifest_csv(str(args.manifest), n_samples=0, seed=int(args.seed))
     
+    # 收集所有可用视频及其时长
     usable = []
     for r in all_rows:
         raw_v = r.get("video_path", None)
@@ -133,13 +153,84 @@ def select_videos(
     if not usable:
         raise SystemExit("no usable videos found")
     
-    n = int(getattr(args, "n_samples", 5))
-    if n <= 0 or n >= len(usable):
-        return usable
+    # 分层采样
+    n_samples = int(getattr(args, "n_samples", 10))
+    use_stratified = not getattr(args, "no_stratified", False)
     
-    df = pd.DataFrame(usable)
-    sub = df.sample(n=n, random_state=int(args.seed))
-    return sub.to_dict(orient="records")
+    if not use_stratified or n_samples <= 0:
+        # 回退到随机采样
+        if n_samples <= 0 or n_samples >= len(usable):
+            return usable
+        df = pd.DataFrame(usable)
+        sub = df.sample(n=n_samples, random_state=int(args.seed))
+        return sub.to_dict(orient="records")
+    
+    # 按时长分桶（按视频文件去重，不同问题算同一视频）
+    rng = np.random.default_rng(int(args.seed))
+    selected = []
+    used_video_files = set()  # 按视频文件去重
+    
+    # 先按视频文件去重
+    unique_videos = {}
+    for v in usable:
+        vpath = v["video_path"]
+        if vpath not in unique_videos:
+            unique_videos[vpath] = v
+    usable_unique = list(unique_videos.values())
+    
+    print(f"\nStratified sampling from {len(usable_unique)} unique videos (total {len(usable)} samples):")
+    
+    for min_sec, max_sec, category, count in DURATION_BUCKETS:
+        if min_sec > max_duration:
+            continue
+        
+        # 找到该桶内的视频（已去重）
+        bucket_videos = [
+            v for v in usable_unique
+            if min_sec <= v["duration"] < max_sec
+            and v["video_path"] not in used_video_files
+        ]
+        
+        if not bucket_videos:
+            print(f"  [{category}] {min_sec}-{max_sec}s: no videos available")
+            continue
+        
+        # 随机采样
+        n_pick = min(count, len(bucket_videos))
+        indices = rng.choice(len(bucket_videos), size=n_pick, replace=False)
+        
+        for idx in indices:
+            v = bucket_videos[idx]
+            v["category"] = category
+            selected.append(v)
+            used_video_files.add(v["video_path"])
+        
+        print(f"  [{category}] {min_sec}-{max_sec}s: selected {n_pick}/{count} (available: {len(bucket_videos)})")
+    
+    # 如果分层采样数量不足，从剩余视频补充（仍需满足max_duration限制）
+    if len(selected) < n_samples:
+        remaining = [
+            v for v in usable_unique 
+            if v["video_path"] not in used_video_files 
+            and v["duration"] <= max_duration  # 确保补充视频也在时长限制内
+        ]
+        if remaining:
+            n_extra = min(n_samples - len(selected), len(remaining))
+            indices = rng.choice(len(remaining), size=n_extra, replace=False)
+            for idx in indices:
+                v = remaining[idx]
+                v["category"] = "extra"
+                selected.append(v)
+            print(f"  [extra] added {n_extra} more videos (duration <= {max_duration}s) to reach {len(selected)} total")
+    
+    # 按时长排序
+    selected.sort(key=lambda x: x["duration"])
+    
+    print(f"Total selected: {len(selected)} videos")
+    for v in selected:
+        print(f"  - {v['duration']:.1f}s ({v.get('category', 'unknown')}): {os.path.basename(v['video_path'])}")
+    
+    return selected
 
 
 def run_hf_backend(
@@ -148,15 +239,28 @@ def run_hf_backend(
     samples: List[Dict[str, Any]],
     out_dir: str,
 ) -> pd.DataFrame:
-    """运行 HuggingFace 后端测试"""
-    from benchmark.vllm_backend import HFBackend
+    """运行 HuggingFace 后端测试 - 带四阶段计时"""
+    import torch
+    from qwen_omni_utils import process_mm_info
+    from utils import profiling_utils as P
     
     print("\n" + "=" * 60)
-    print("Running HuggingFace Backend")
+    print("Running HuggingFace Backend (with TTFT breakdown)")
     print("=" * 60)
     
-    backend = HFBackend(args.model_dir, dtype=str(args.dtype))
-    backend.load()
+    # 加载模型
+    loaded = runner.load()
+    model = loaded.model
+    processor = loaded.processor
+    
+    # 获取模块 (Qwen2.5-Omni 结构)
+    if hasattr(model, "thinker"):
+        visual = getattr(model.thinker, "visual", None)
+        llm = getattr(model.thinker, "model", model)
+    else:
+        visual = None
+        llm = model
+    audio = None  # vllm-comparison 不使用音频
     
     rows = []
     for i, s in enumerate(samples):
@@ -171,18 +275,57 @@ def run_hf_backend(
             do_record = int(r) >= int(max(0, args.warmup))
             
             try:
-                import torch
                 import gc
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                result = backend.generate_video(
-                    video_path,
-                    question,
-                    max_tokens=int(args.max_new_tokens) if hasattr(args, "max_new_tokens") else 50,
-                    video_nframes=int(args.video_nframes) if args.video_nframes else None,
-                )
+                # === Preprocess ===
+                t_preprocess_start = time.perf_counter()
+                
+                video_nframes = int(args.video_nframes) if args.video_nframes else None
+                video_element = {"type": "video", "video": str(video_path)}
+                if video_nframes:
+                    video_element["nframes"] = video_nframes
+                
+                messages = [{"role": "user", "content": [video_element, {"type": "text", "text": question}]}]
+                _, images, videos = process_mm_info(messages, use_audio_in_video=False)
+                
+                prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = processor(text=prompt, videos=videos, return_tensors="pt", padding=True).to(model.device)
+                
+                torch.cuda.synchronize()
+                preprocess_ms = (time.perf_counter() - t_preprocess_start) * 1000
+                
+                # === Setup hooks ===
+                encoder_timer = P.EncoderTimer()
+                encoder_timer.register(model)
+                
+                # === Generate (encode + prefill + decode) ===
+                torch.cuda.synchronize()
+                t_gen_start = time.perf_counter()
+                
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=1,  # 只生成1个token测TTFT
+                        do_sample=False,
+                        return_audio=False,
+                    )
+                
+                torch.cuda.synchronize()
+                ttft_ms = (time.perf_counter() - t_gen_start) * 1000
+                
+                # === Collect timing ===
+                visual_encoder_ms = float(encoder_timer.times["visual"][-1]) if encoder_timer.times["visual"] else 0.0
+                audio_encoder_ms = 0.0  # 无音频
+                encoder_ms = visual_encoder_ms + audio_encoder_ms
+                prefill_ms = float(max(0.0, ttft_ms - encoder_ms))
+                
+                # Cleanup
+                encoder_timer.remove()
+                
+                prompt_tokens = inputs.input_ids.shape[-1]
                 
                 if do_record:
                     rows.append({
@@ -191,14 +334,13 @@ def run_hf_backend(
                         "video_path": video_path,
                         "duration": duration,
                         "repeat": r,
-                        "ttft_ms": result.ttft_ms,
-                        "total_ms": result.total_ms,
-                        "num_tokens": result.num_tokens,
-                        "prompt_tokens": result.prompt_tokens,
-                        "tokens_per_sec": result.tokens_per_sec,
-                        "output_text": result.output_text[:100],
+                        "preprocess_ms": preprocess_ms,
+                        "encoder_ms": encoder_ms,
+                        "prefill_ms": prefill_ms,
+                        "ttft_ms": preprocess_ms + ttft_ms,  # 总 TTFT = preprocess + generate(1 token)
+                        "prompt_tokens": prompt_tokens,
                     })
-                    print(f"    repeat={r}: TTFT={result.ttft_ms:.1f}ms, total={result.total_ms:.1f}ms")
+                    print(f"    repeat={r}: preprocess={preprocess_ms:.1f}ms, encoder={encoder_ms:.1f}ms, prefill={prefill_ms:.1f}ms, TTFT={preprocess_ms + ttft_ms:.1f}ms")
                     
             except Exception as e:
                 print(f"    Error: {e}")
@@ -223,16 +365,21 @@ def run_vllm_backend(
     samples: List[Dict[str, Any]],
     out_dir: str,
 ) -> pd.DataFrame:
-    """运行 vLLM 后端测试"""
+    """运行 vLLM 后端测试 - 带阶段计时"""
     from benchmark.vllm_backend import VLLMBackend
     
     print("\n" + "=" * 60)
-    print("Running vLLM Backend")
+    print("Running vLLM Backend (with timing breakdown)")
     print("=" * 60)
+    
+    # vLLM requires full dtype name (bfloat16, not bf16)
+    vllm_dtype_map = {"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}
+    raw_dtype = str(args.dtype) if hasattr(args, "dtype") else "bfloat16"
+    vllm_dtype = vllm_dtype_map.get(raw_dtype, raw_dtype)
     
     backend = VLLMBackend(
         args.model_dir,
-        dtype=str(args.dtype) if hasattr(args, "dtype") else "bfloat16",
+        dtype=vllm_dtype,
         gpu_memory_utilization=float(getattr(args, "gpu_memory_utilization", 0.85)),
         max_model_len=int(getattr(args, "max_model_len", 32768)),
     )
@@ -251,10 +398,10 @@ def run_vllm_backend(
             do_record = int(r) >= int(max(0, args.warmup))
             
             try:
-                result = backend.generate_video(
+                # 使用 measure_ttft_with_breakdown 获取阶段时间
+                result = backend.measure_ttft_with_breakdown(
                     video_path,
                     question,
-                    max_tokens=int(args.max_new_tokens) if hasattr(args, "max_new_tokens") else 50,
                     video_nframes=int(args.video_nframes) if args.video_nframes else None,
                 )
                 
@@ -265,14 +412,12 @@ def run_vllm_backend(
                         "video_path": video_path,
                         "duration": duration,
                         "repeat": r,
-                        "ttft_ms": result.ttft_ms,
-                        "total_ms": result.total_ms,
-                        "num_tokens": result.num_tokens,
-                        "prompt_tokens": result.prompt_tokens,
-                        "tokens_per_sec": result.tokens_per_sec,
-                        "output_text": result.output_text[:100],
+                        "preprocess_ms": result.get("preprocess_ms", 0),
+                        "model_ms": result.get("model_ms", 0),  # encoder + prefill (vLLM 黑盒无法分解)
+                        "ttft_ms": result.get("ttft_ms", 0),
+                        "prompt_tokens": result.get("prompt_tokens", 0),
                     })
-                    print(f"    repeat={r}: TTFT={result.ttft_ms:.1f}ms, total={result.total_ms:.1f}ms")
+                    print(f"    repeat={r}: preprocess={result.get('preprocess_ms', 0):.1f}ms, model={result.get('model_ms', 0):.1f}ms, TTFT={result.get('ttft_ms', 0):.1f}ms")
                     
             except Exception as e:
                 print(f"    Error: {e}")
@@ -316,12 +461,15 @@ def merge_and_plot(out_dir: str) -> None:
         print("No valid results to plot")
         return
     
-    # 按 backend 和 sample_id 聚合
-    summary = df_ok.groupby(["backend", "sample_id", "duration"]).agg({
-        "ttft_ms": "mean",
-        "total_ms": "mean",
-        "tokens_per_sec": "mean",
-    }).reset_index()
+    # 按 backend 和 sample_id 聚合 (动态选择可用列)
+    agg_dict = {"ttft_ms": "mean", "prompt_tokens": "first"}
+    
+    # 可选列
+    for col in ["preprocess_ms", "encoder_ms", "prefill_ms", "model_ms", "total_ms", "tokens_per_sec"]:
+        if col in df_ok.columns:
+            agg_dict[col] = "mean"
+    
+    summary = df_ok.groupby(["backend", "sample_id", "duration"]).agg(agg_dict).reset_index()
     
     # 保存汇总
     summary.to_csv(os.path.join(out_dir, "summary.csv"), index=False)
@@ -338,32 +486,80 @@ def merge_and_plot(out_dir: str) -> None:
 
 
 def _plot_single_backend(summary: pd.DataFrame, out_dir: str) -> None:
-    """单个 backend 的结果图"""
+    """单个 backend 的结果图 - TTFT 分解堆叠图"""
     backend = summary["backend"].iloc[0]
     
-    # 按时长排序
-    summary = summary.sort_values("duration")
+    # 按 prompt_tokens 排序
+    summary = summary.sort_values("prompt_tokens")
+    n = len(summary)
+    x = np.arange(n)
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
     
-    # TTFT
-    x = np.arange(len(summary))
-    ax1.bar(x, summary["ttft_ms"] / 1000, color="#3498db", alpha=0.8)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels([f"{d:.0f}s" for d in summary["duration"]], rotation=45, ha="right")
-    ax1.set_xlabel("Video Duration")
-    ax1.set_ylabel("TTFT (seconds)")
-    ax1.set_title(f"{backend.upper()} TTFT by Video Duration")
-    ax1.grid(axis="y", alpha=0.3)
+    # === 左图: TTFT 堆叠 ===
+    preprocess = summary["preprocess_ms"].fillna(0).values / 1000 if "preprocess_ms" in summary.columns else np.zeros(n)
+    encoder = summary["encoder_ms"].fillna(0).values / 1000 if "encoder_ms" in summary.columns else np.zeros(n)
+    prefill = summary["prefill_ms"].fillna(0).values / 1000 if "prefill_ms" in summary.columns else np.zeros(n)
+    model = summary["model_ms"].fillna(0).values / 1000 if "model_ms" in summary.columns else np.zeros(n)
     
-    # Throughput
-    ax2.bar(x, summary["tokens_per_sec"], color="#2ecc71", alpha=0.8)
+    bottom = np.zeros(n)
+    if preprocess.any():
+        ax1.bar(x, preprocess, width=0.6, bottom=bottom, label="Preprocess", color="#2ecc71")
+        bottom += preprocess
+    if encoder.any():
+        ax1.bar(x, encoder, width=0.6, bottom=bottom, label="Encoder", color="#3498db")
+        bottom += encoder
+    if prefill.any():
+        ax1.bar(x, prefill, width=0.6, bottom=bottom, label="Prefill", color="#9b59b6")
+        bottom += prefill
+    if model.any():
+        ax1.bar(x, model, width=0.6, bottom=bottom, label="Model", color="#e74c3c")
+    
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f"{int(t)}" for t in summary["prompt_tokens"]], rotation=45, ha="right", fontsize=8)
+    ax1.set_xlabel("Prompt Tokens")
+    ax1.set_ylabel("Time (seconds)")
+    ax1.set_title(f"{backend.upper()} TTFT Breakdown (Stacked)")
+    ax1.legend()
+    ax1.grid(axis="y", alpha=0.3)
+    # 上方X轴: duration
+    ax1_top = ax1.twiny()
+    ax1_top.set_xlim(ax1.get_xlim())
+    ax1_top.set_xticks(x)
+    ax1_top.set_xticklabels([f"{d:.0f}s" for d in summary["duration"]], fontsize=8)
+    ax1_top.set_xlabel("Duration")
+    
+    # === 右图: TTFT 百分比分解 ===
+    total = preprocess + encoder + prefill + model
+    total = np.where(total == 0, 1, total)  # 避免除零
+    
+    bottom = np.zeros(n)
+    if preprocess.any():
+        ax2.bar(x, preprocess / total * 100, width=0.6, bottom=bottom, label="Preprocess", color="#2ecc71")
+        bottom += preprocess / total * 100
+    if encoder.any():
+        ax2.bar(x, encoder / total * 100, width=0.6, bottom=bottom, label="Encoder", color="#3498db")
+        bottom += encoder / total * 100
+    if prefill.any():
+        ax2.bar(x, prefill / total * 100, width=0.6, bottom=bottom, label="Prefill", color="#9b59b6")
+        bottom += prefill / total * 100
+    if model.any():
+        ax2.bar(x, model / total * 100, width=0.6, bottom=bottom, label="Model", color="#e74c3c")
+    
     ax2.set_xticks(x)
-    ax2.set_xticklabels([f"{d:.0f}s" for d in summary["duration"]], rotation=45, ha="right")
-    ax2.set_xlabel("Video Duration")
-    ax2.set_ylabel("Tokens/sec")
-    ax2.set_title(f"{backend.upper()} Throughput by Video Duration")
+    ax2.set_xticklabels([f"{int(t)}" for t in summary["prompt_tokens"]], rotation=45, ha="right", fontsize=8)
+    ax2.set_xlabel("Prompt Tokens")
+    ax2.set_ylabel("Percentage (%)")
+    ax2.set_title(f"{backend.upper()} TTFT Breakdown (%)")
+    ax2.set_ylim(0, 100)
+    ax2.legend()
     ax2.grid(axis="y", alpha=0.3)
+    # 上方X轴: duration
+    ax2_top = ax2.twiny()
+    ax2_top.set_xlim(ax2.get_xlim())
+    ax2_top.set_xticks(x)
+    ax2_top.set_xticklabels([f"{d:.0f}s" for d in summary["duration"]], fontsize=8)
+    ax2_top.set_xlabel("Duration")
     
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f"{backend}_results.png"), dpi=150, bbox_inches="tight")
@@ -372,9 +568,9 @@ def _plot_single_backend(summary: pd.DataFrame, out_dir: str) -> None:
 
 
 def _plot_comparison(summary: pd.DataFrame, out_dir: str) -> None:
-    """HF vs vLLM 对比图"""
-    hf_data = summary[summary["backend"] == "hf"].sort_values("duration")
-    vllm_data = summary[summary["backend"] == "vllm"].sort_values("duration")
+    """HF vs vLLM TTFT 对比图 - 并排堆叠柱状图（绝对值 + 百分比）"""
+    hf_data = summary[summary["backend"] == "hf"].sort_values("prompt_tokens")
+    vllm_data = summary[summary["backend"] == "vllm"].sort_values("prompt_tokens")
     
     # 找共同的 sample_id
     common_samples = set(hf_data["sample_id"]) & set(vllm_data["sample_id"])
@@ -382,7 +578,7 @@ def _plot_comparison(summary: pd.DataFrame, out_dir: str) -> None:
         print("No common samples between HF and vLLM")
         return
     
-    hf_data = hf_data[hf_data["sample_id"].isin(common_samples)].sort_values("duration")
+    hf_data = hf_data[hf_data["sample_id"].isin(common_samples)].sort_values("prompt_tokens")
     vllm_data = vllm_data[vllm_data["sample_id"].isin(common_samples)]
     vllm_data = vllm_data.set_index("sample_id").loc[hf_data["sample_id"]].reset_index()
     
@@ -390,55 +586,111 @@ def _plot_comparison(summary: pd.DataFrame, out_dir: str) -> None:
     x = np.arange(n)
     width = 0.35
     
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    # === 获取 HF 阶段时间 (秒) ===
+    hf_preprocess = hf_data["preprocess_ms"].fillna(0).values / 1000 if "preprocess_ms" in hf_data.columns else np.zeros(n)
+    hf_encoder = hf_data["encoder_ms"].fillna(0).values / 1000 if "encoder_ms" in hf_data.columns else np.zeros(n)
+    hf_prefill = hf_data["prefill_ms"].fillna(0).values / 1000 if "prefill_ms" in hf_data.columns else np.zeros(n)
+    hf_ttft = hf_data["ttft_ms"].values / 1000
     
-    # ========== 1. TTFT 对比 ==========
-    ax = axes[0, 0]
-    ax.bar(x - width/2, hf_data["ttft_ms"] / 1000, width, label="HuggingFace", color="#3498db")
-    ax.bar(x + width/2, vllm_data["ttft_ms"] / 1000, width, label="vLLM", color="#e74c3c")
+    # === 获取 vLLM 阶段时间 (秒) ===
+    # vLLM 只有 preprocess 和 model (encoder+prefill 无法分解)
+    vllm_preprocess = vllm_data["preprocess_ms"].fillna(0).values / 1000 if "preprocess_ms" in vllm_data.columns else np.zeros(n)
+    vllm_model = vllm_data["model_ms"].fillna(0).values / 1000 if "model_ms" in vllm_data.columns else np.zeros(n)
+    vllm_ttft = vllm_data["ttft_ms"].values / 1000
+    
+    # 颜色定义
+    colors = {
+        "preprocess": "#2ecc71",  # 绿色
+        "encoder": "#3498db",     # 蓝色
+        "prefill": "#9b59b6",     # 紫色
+        "model": "#e74c3c",       # 红色 (vLLM encoder+prefill)
+    }
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # ========== 图1: 绝对值堆叠柱状图 ==========
+    ax = axes[0]
+    
+    # HF 堆叠 (左边柱)
+    bottom_hf = np.zeros(n)
+    ax.bar(x - width/2, hf_preprocess, width, bottom=bottom_hf, label="Preprocess", color=colors["preprocess"])
+    bottom_hf += hf_preprocess
+    ax.bar(x - width/2, hf_encoder, width, bottom=bottom_hf, label="Encoder", color=colors["encoder"])
+    bottom_hf += hf_encoder
+    ax.bar(x - width/2, hf_prefill, width, bottom=bottom_hf, label="Prefill", color=colors["prefill"])
+    
+    # vLLM 堆叠 (右边柱)
+    bottom_vllm = np.zeros(n)
+    ax.bar(x + width/2, vllm_preprocess, width, bottom=bottom_vllm, color=colors["preprocess"])
+    bottom_vllm += vllm_preprocess
+    ax.bar(x + width/2, vllm_model, width, bottom=bottom_vllm, label="Encoder+Prefill", color=colors["model"])
+    
+    # X轴：每组显示 token 数量，下方两行分别标注 HF 和 vLLM
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], rotation=45, ha="right")
-    ax.set_xlabel("Video Duration")
-    ax.set_ylabel("TTFT (seconds)")
-    ax.set_title("Time To First Token (TTFT) Comparison")
-    ax.legend()
+    # 主标签：token 数量 + 换行 + HF vLLM
+    xlabels = [f"{int(t)}\nHF  vLLM" for t in hf_data["prompt_tokens"]]
+    ax.set_xticklabels(xlabels, fontsize=9)
+    ax.set_xlabel("Prompt Tokens", fontsize=11)
+    ax.set_ylabel("Time (seconds)", fontsize=11)
+    ax.set_title("TTFT Breakdown: HF vs vLLM (Absolute)", fontsize=12, fontweight="bold")
+    
+    # 上方X轴: duration
+    ax_top = ax.twiny()
+    ax_top.set_xlim(ax.get_xlim())
+    ax_top.set_xticks(x)
+    ax_top.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], fontsize=9)
+    ax_top.set_xlabel("Video Duration", fontsize=11)
+    
+    ax.legend(loc="upper left", fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     
-    # ========== 2. Total Time 对比 ==========
-    ax = axes[0, 1]
-    ax.bar(x - width/2, hf_data["total_ms"] / 1000, width, label="HuggingFace", color="#3498db")
-    ax.bar(x + width/2, vllm_data["total_ms"] / 1000, width, label="vLLM", color="#e74c3c")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], rotation=45, ha="right")
-    ax.set_xlabel("Video Duration")
-    ax.set_ylabel("Total Time (seconds)")
-    ax.set_title("Total Generation Time Comparison")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
+    # ========== 图2: 百分比堆叠柱状图 ==========
+    ax = axes[1]
     
-    # ========== 3. Throughput 对比 ==========
-    ax = axes[1, 0]
-    ax.bar(x - width/2, hf_data["tokens_per_sec"], width, label="HuggingFace", color="#3498db")
-    ax.bar(x + width/2, vllm_data["tokens_per_sec"], width, label="vLLM", color="#e74c3c")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], rotation=45, ha="right")
-    ax.set_xlabel("Video Duration")
-    ax.set_ylabel("Tokens/sec")
-    ax.set_title("Throughput Comparison")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
+    # HF 百分比
+    hf_total = hf_preprocess + hf_encoder + hf_prefill
+    hf_total = np.where(hf_total == 0, 1, hf_total)  # 避免除零
+    hf_pre_pct = hf_preprocess / hf_total * 100
+    hf_enc_pct = hf_encoder / hf_total * 100
+    hf_prefill_pct = hf_prefill / hf_total * 100
     
-    # ========== 4. TTFT 差异百分比 ==========
-    ax = axes[1, 1]
-    ttft_diff_pct = (vllm_data["ttft_ms"].values - hf_data["ttft_ms"].values) / hf_data["ttft_ms"].values * 100
-    colors = ["#2ecc71" if d < 0 else "#e74c3c" for d in ttft_diff_pct]
-    ax.bar(x, ttft_diff_pct, color=colors, alpha=0.8)
-    ax.axhline(y=0, color="black", linestyle="-", linewidth=0.5)
+    # vLLM 百分比
+    vllm_total = vllm_preprocess + vllm_model
+    vllm_total = np.where(vllm_total == 0, 1, vllm_total)
+    vllm_pre_pct = vllm_preprocess / vllm_total * 100
+    vllm_model_pct = vllm_model / vllm_total * 100
+    
+    # HF 堆叠
+    bottom_hf = np.zeros(n)
+    ax.bar(x - width/2, hf_pre_pct, width, bottom=bottom_hf, label="Preprocess", color=colors["preprocess"])
+    bottom_hf += hf_pre_pct
+    ax.bar(x - width/2, hf_enc_pct, width, bottom=bottom_hf, label="Encoder", color=colors["encoder"])
+    bottom_hf += hf_enc_pct
+    ax.bar(x - width/2, hf_prefill_pct, width, bottom=bottom_hf, label="Prefill", color=colors["prefill"])
+    
+    # vLLM 堆叠
+    bottom_vllm = np.zeros(n)
+    ax.bar(x + width/2, vllm_pre_pct, width, bottom=bottom_vllm, color=colors["preprocess"])
+    bottom_vllm += vllm_pre_pct
+    ax.bar(x + width/2, vllm_model_pct, width, bottom=bottom_vllm, label="Encoder+Prefill", color=colors["model"])
+    
+    # X轴：每组显示 token 数量，下方两行分别标注 HF 和 vLLM
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], rotation=45, ha="right")
-    ax.set_xlabel("Video Duration")
-    ax.set_ylabel("TTFT Difference (%)")
-    ax.set_title("vLLM TTFT vs HF\n(negative = vLLM faster, positive = HF faster)")
+    xlabels = [f"{int(t)}\nHF  vLLM" for t in hf_data["prompt_tokens"]]
+    ax.set_xticklabels(xlabels, fontsize=9)
+    ax.set_xlabel("Prompt Tokens", fontsize=11)
+    ax.set_ylabel("Percentage (%)", fontsize=11)
+    ax.set_ylim(0, 100)
+    ax.set_title("TTFT Breakdown: HF vs vLLM (Percentage)", fontsize=12, fontweight="bold")
+    
+    # 上方X轴: duration
+    ax_top = ax.twiny()
+    ax_top.set_xlim(ax.get_xlim())
+    ax_top.set_xticks(x)
+    ax_top.set_xticklabels([f"{d:.0f}s" for d in hf_data["duration"]], fontsize=9)
+    ax_top.set_xlabel("Video Duration", fontsize=11)
+    
+    ax.legend(loc="upper left", fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     
     plt.tight_layout()
@@ -447,16 +699,13 @@ def _plot_comparison(summary: pd.DataFrame, out_dir: str) -> None:
     print(f"Saved: vllm_vs_hf_comparison.png")
     
     # 打印统计
+    speedup = hf_data['ttft_ms'].mean() / vllm_data['ttft_ms'].mean()
     print("\n" + "=" * 60)
     print("Summary Statistics")
     print("=" * 60)
     print(f"HF mean TTFT:   {hf_data['ttft_ms'].mean():.1f} ms")
     print(f"vLLM mean TTFT: {vllm_data['ttft_ms'].mean():.1f} ms")
-    print(f"Difference:     {ttft_diff_pct.mean():.1f}%")
-    
-    if abs(ttft_diff_pct.mean()) < 10:
-        print("\n结论：vLLM 和 HF 的 TTFT 差异 < 10%，证明 vLLM 在单请求场景下")
-        print("      对 encoder/prefill 阶段没有显著优化")
+    print(f"Speedup:        {speedup:.2f}x")
 
 
 def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
@@ -464,7 +713,7 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
     os.makedirs(out_dir, exist_ok=True)
     
     # 选择视频
-    max_dur = float(getattr(args, "max_video_duration", 300.0))
+    max_dur = float(getattr(args, "max_video_duration", 32.0))
     samples = select_videos(args, runner, max_duration=max_dur)
     
     print(f"Selected {len(samples)} videos for comparison")
@@ -479,13 +728,29 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
         run_hf_backend(args, runner, samples, out_dir)
     
     if backend in ("vllm", "both"):
-        # 如果是 both，需要释放 HF 模型后再加载 vLLM
+        # 如果是 both，需要彻底释放 HF 模型后再加载 vLLM
         if backend == "both":
             import gc
             import torch
+            
+            # 释放 runner 中的 HF 模型
+            if hasattr(runner, "_model") and runner._model is not None:
+                del runner._model
+                runner._model = None
+            if hasattr(runner, "_proc") and runner._proc is not None:
+                del runner._proc
+                runner._proc = None
+            if hasattr(runner, "_fe") and runner._fe is not None:
+                del runner._fe
+                runner._fe = None
+            
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            print("\n[INFO] HF 模型已释放，准备加载 vLLM...")
+        
         run_vllm_backend(args, runner, samples, out_dir)
     
     # 合并结果并生成图

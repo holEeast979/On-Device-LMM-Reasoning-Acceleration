@@ -293,6 +293,148 @@ class VLLMBackend:
             tokens_per_sec=tokens_per_sec,
         )
 
+    def measure_ttft(self, video_path: str, question: str, video_nframes: Optional[int] = None) -> float:
+        """
+        精确测量 TTFT：使用 max_tokens=1 直接测量生成第一个 token 的时间。
+        
+        这比估算更准确，因为不需要假设所有 token 生成时间相同。
+        
+        Returns:
+            TTFT 时间（毫秒），不包含预处理时间
+        """
+        if self._llm is None:
+            raise RuntimeError("Model not loaded. Call load() first.")
+        
+        from vllm import SamplingParams
+        
+        # 构建消息
+        video_element = {"type": "video", "video": str(video_path)}
+        if video_nframes is not None and int(video_nframes) > 0:
+            video_element["nframes"] = int(video_nframes)
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    video_element,
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        
+        prompt = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        from qwen_omni_utils import process_mm_info
+        _, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        
+        mm_data = {}
+        if videos:
+            mm_data["video"] = videos
+        
+        # 只生成 1 个 token
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+        )
+        
+        # 精确测量
+        t_gen_start = time.perf_counter()
+        outputs = self._llm.generate(
+            [{"prompt": prompt, "multi_modal_data": mm_data}],
+            sampling_params=sampling_params,
+        )
+        ttft_ms = (time.perf_counter() - t_gen_start) * 1000
+        
+        return ttft_ms
+
+    def measure_ttft_with_breakdown(
+        self, 
+        video_path: str, 
+        question: str, 
+        video_nframes: Optional[int] = None
+    ) -> Dict[str, float]:
+        """
+        测量 TTFT 并返回阶段分解。
+        
+        vLLM 是黑盒，无法分解 encoder/prefill，所以只返回：
+        - preprocess_ms: 视频提取+处理时间
+        - model_ms: vLLM 模型推理时间 (encoder + prefill + 1 token decode)
+        - ttft_ms: 总 TTFT
+        - prompt_tokens: prompt token 数
+        
+        Returns:
+            Dict with timing breakdown
+        """
+        if self._llm is None:
+            raise RuntimeError("Model not loaded. Call load() first.")
+        
+        from vllm import SamplingParams
+        
+        # 构建消息
+        video_element = {"type": "video", "video": str(video_path)}
+        if video_nframes is not None and int(video_nframes) > 0:
+            video_element["nframes"] = int(video_nframes)
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    video_element,
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        
+        prompt = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        # === Preprocess ===
+        from qwen_omni_utils import process_mm_info
+        t_preprocess_start = time.perf_counter()
+        _, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        preprocess_ms = (time.perf_counter() - t_preprocess_start) * 1000
+        
+        mm_data = {}
+        if videos:
+            mm_data["video"] = videos
+        
+        # 只生成 1 个 token
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+        )
+        
+        # === Model inference ===
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        t_model_start = time.perf_counter()
+        outputs = self._llm.generate(
+            [{"prompt": prompt, "multi_modal_data": mm_data}],
+            sampling_params=sampling_params,
+        )
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        model_ms = (time.perf_counter() - t_model_start) * 1000
+        
+        prompt_tokens = len(outputs[0].prompt_token_ids) if outputs else 0
+        
+        return {
+            "preprocess_ms": preprocess_ms,
+            "model_ms": model_ms,
+            "ttft_ms": preprocess_ms + model_ms,
+            "prompt_tokens": prompt_tokens,
+        }
+
 
 class HFBackend:
     """HuggingFace 推理后端封装 (用于公平对比)"""
@@ -431,6 +573,89 @@ class HFBackend:
             prompt_tokens=prompt_tokens,
             tokens_per_sec=tokens_per_sec,
         )
+
+    def measure_ttft(self, video_path: str, question: str, video_nframes: Optional[int] = None, use_cuda_event: bool = True) -> float:
+        """
+        精确测量 TTFT：使用 max_new_tokens=1 直接测量生成第一个 token 的时间。
+        
+        Args:
+            video_path: 视频路径
+            question: 问题文本
+            video_nframes: 采样帧数
+            use_cuda_event: 是否使用 CUDA Event 计时（更精确）
+        
+        Returns:
+            TTFT 时间（毫秒），不包含预处理时间
+        """
+        if self._model is None:
+            raise RuntimeError("Model not loaded. Call load() first.")
+        
+        import torch
+        from qwen_omni_utils import process_mm_info
+        
+        # 构建消息
+        video_element = {"type": "video", "video": str(video_path)}
+        if video_nframes is not None and int(video_nframes) > 0:
+            video_element["nframes"] = int(video_nframes)
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    video_element,
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        
+        _, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        
+        prompt = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        inputs = self._processor(
+            text=prompt,
+            videos=videos,
+            return_tensors="pt",
+            padding=True,
+        ).to(self._model.device)
+        
+        # 精确测量 TTFT
+        if use_cuda_event and torch.cuda.is_available():
+            device = self._model.device
+            if device.type == "cuda":
+                with torch.cuda.device(device):
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    
+                    start_event.record()
+                    with torch.no_grad():
+                        self._model.generate(
+                            **inputs,
+                            max_new_tokens=1,
+                            do_sample=False,
+                            return_audio=False,
+                        )
+                    end_event.record()
+                    end_event.synchronize()
+                    
+                    return float(start_event.elapsed_time(end_event))
+        
+        # Fallback to wall-clock
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            self._model.generate(
+                **inputs,
+                max_new_tokens=1,
+                do_sample=False,
+                return_audio=False,
+            )
+        torch.cuda.synchronize()
+        return (time.perf_counter() - t0) * 1000
 
 
 def create_backend(backend_type: str, model_dir: str, **kwargs):

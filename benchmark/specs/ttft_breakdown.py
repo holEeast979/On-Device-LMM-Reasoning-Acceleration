@@ -13,7 +13,7 @@ import pandas as pd
 
 from benchmark.runner import BenchmarkRunner
 from benchmark.unified_runner import UnifiedRunner
-import profiling_utils as P
+from utils import profiling_utils as P
 
 
 SPEC_NAME = "ttft-breakdown"
@@ -197,11 +197,12 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
         visual_encoder_ms = float(sum(visual_timer.times)) if visual is not None else 0.0
         audio_encoder_ms = float(sum(audio_timer.times))
-        llm_prefill_ms = float(prefill_capture.prefill_forward_ms) if llm is not None else None
+        llm_forward_ms = float(prefill_capture.prefill_forward_ms) if llm is not None else None
         llm_prefill_seq_len = int(prefill_capture.prefill_seq_len) if llm is not None else None
 
-        prefill_ms_for_other = float(llm_prefill_ms) if llm_prefill_ms is not None else 0.0
-        other_ms = float(max(0.0, float(ttft_ms) - float(visual_encoder_ms) - float(audio_encoder_ms) - prefill_ms_for_other))
+        # prefill = ttft - encoders（包含 embedding merge + RoPE + LLM forward + 开销）
+        # 这符合学术界对 LMM prefill 阶段的定义
+        prefill_ms = float(max(0.0, float(ttft_ms) - float(visual_encoder_ms) - float(audio_encoder_ms)))
 
         mem_row: Dict[str, Any] = {}
         if mem_monitor is not None:
@@ -234,9 +235,8 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
             "mel_frames": int(mel_frames),
             "visual_encoder_ms": float(visual_encoder_ms),
             "audio_encoder_ms": float(audio_encoder_ms),
-            "llm_prefill_ms": llm_prefill_ms,
+            "prefill_ms": float(prefill_ms),  # 完整 prefill = ttft - encoders
             "llm_prefill_seq_len": llm_prefill_seq_len,
-            "other_ms": float(other_ms),
             "ttft_ms": float(ttft_ms),
             **token_stats,
             **mem_row,
@@ -262,8 +262,7 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
             "preprocess_ms_mean": float(df_ok["preprocess_ms"].mean()) if "preprocess_ms" in df_ok.columns else None,
             "visual_encoder_ms_mean": float(df_ok["visual_encoder_ms"].mean()) if "visual_encoder_ms" in df_ok.columns else None,
             "audio_encoder_ms_mean": float(df_ok["audio_encoder_ms"].mean()) if "audio_encoder_ms" in df_ok.columns else None,
-            "llm_prefill_ms_mean": float(df_ok["llm_prefill_ms"].mean()) if "llm_prefill_ms" in df_ok.columns else None,
-            "other_ms_mean": float(df_ok["other_ms"].mean()) if "other_ms" in df_ok.columns else None,
+            "prefill_ms_mean": float(df_ok["prefill_ms"].mean()) if "prefill_ms" in df_ok.columns else None,
             "ttft_ms_mean": float(df_ok["ttft_ms"].mean()) if "ttft_ms" in df_ok.columns else None,
         }
         for k in (
@@ -339,22 +338,20 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
         visual_ms = float(summary.get("visual_encoder_ms_mean") or 0.0)
         audio_ms = float(summary.get("audio_encoder_ms_mean") or 0.0)
-        prefill_ms = float(summary.get("llm_prefill_ms_mean") or 0.0)
-        other_ms = float(summary.get("other_ms_mean") or 0.0)
+        prefill_ms = float(summary.get("prefill_ms_mean") or 0.0)
 
         plt.figure(figsize=(6, 4))
         bottom = 0.0
         for v, label, color in (
             (visual_ms, "visual_encoder", "#72B7B2"),
             (audio_ms, "audio_encoder", "#54A24B"),
-            (prefill_ms, "llm_prefill", "#EECA3B"),
-            (other_ms, "other", "#B279A2"),
+            (prefill_ms, "prefill", "#EECA3B"),
         ):
             plt.bar([0], [v], bottom=bottom, label=label, color=color)
             bottom += float(v)
         plt.xticks([0], ["ttft"], rotation=0)
         plt.ylabel("ms")
-        plt.title("ttft breakdown (mean)")
+        plt.title("TTFT breakdown (mean): encode + prefill")
         plt.grid(True, axis="y", linestyle="--", alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -367,8 +364,7 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
                 .agg(
                     visual_encoder_ms_mean=("visual_encoder_ms", "mean"),
                     audio_encoder_ms_mean=("audio_encoder_ms", "mean"),
-                    llm_prefill_ms_mean=("llm_prefill_ms", "mean"),
-                    other_ms_mean=("other_ms", "mean"),
+                    prefill_ms_mean=("prefill_ms", "mean"),
                     ttft_ms_mean=("ttft_ms", "mean"),
                     n=("ttft_ms", "count"),
                 )
@@ -382,15 +378,14 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
             for k, label, color in (
                 ("visual_encoder_ms_mean", "visual_encoder", "#72B7B2"),
                 ("audio_encoder_ms_mean", "audio_encoder", "#54A24B"),
-                ("llm_prefill_ms_mean", "llm_prefill", "#EECA3B"),
-                ("other_ms_mean", "other", "#B279A2"),
+                ("prefill_ms_mean", "prefill", "#EECA3B"),
             ):
                 vals = sub[k].to_numpy(dtype=float)
                 plt.bar(xs, vals, bottom=bottom, label=label, color=color)
                 bottom += vals
             plt.xticks(xs, sub["sample_id"].astype(str).tolist(), rotation=60, ha="right")
             plt.ylabel("ms")
-            plt.title("ttft breakdown by sample (mean)")
+            plt.title("TTFT breakdown by sample (mean)")
             plt.grid(True, axis="y", linestyle="--", alpha=0.3)
             plt.legend(ncol=2)
             plt.tight_layout()

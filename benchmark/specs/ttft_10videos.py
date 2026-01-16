@@ -3,10 +3,12 @@ Spec: ttft-10videos
 10个不同时长视频的 TTFT Breakdown 测试
 目标：生成个案百分比堆叠图，替代之前的平均值图表
 
-视频时长分布设计：
-- 短视频 (3个): 30s, 45s, 60s
-- 中视频 (4个): 2min, 3min, 4min, 5min  
-- 长视频 (3个): 7min, 10min, 12min
+视频时长分布设计（适配32GB显存，动态帧采样2FPS）：
+- 5-10s (2个): 10-20帧
+- 10-15s (2个): 20-30帧
+- 15-20s (2个): 30-40帧
+- 20-25s (2个): 40-50帧
+- 25-30s (2个): 50-60帧
 
 使用方法:
     python benchmark/run.py ttft-10videos \
@@ -38,18 +40,20 @@ from utils import profiling_utils as P
 
 SPEC_NAME = "ttft-10videos"
 
-# 目标视频时长分布 (秒, 类别)
+# 目标视频时长分布 (秒, 类别) - 动态帧采样2FPS
+# 32GB GPU: 实测安全上限 34s，38s OOM
+# 10个视频均匀分布在 8-34s 范围
 TARGET_DURATIONS = [
-    (30, "short"),
-    (45, "short"),
-    (60, "short"),
-    (120, "medium"),
-    (180, "medium"),
-    (240, "medium"),
-    (300, "medium"),
-    (420, "long"),
-    (600, "long"),
-    (720, "long"),
+    (8, "tier1"),     # 8s
+    (14, "tier1"),    # 14s
+    (16, "tier2"),    # 16s
+    (21, "tier2"),    # 21s
+    (23, "tier2"),    # 23s
+    (24, "tier3"),    # 24s
+    (25, "tier3"),    # 25s
+    (30, "tier3"),    # 30s
+    (32, "tier4"),    # 32s
+    (34, "tier4"),    # 34s (安全上限)
 ]
 
 
@@ -60,8 +64,8 @@ def register_subcommand(subparsers, common_parser) -> None:
         help="TTFT breakdown for 10 videos of varying durations (individual stacked bar chart)"
     )
     p.add_argument("--audio-max-seconds", type=float, default=30.0, help="Max audio length for feature extraction")
-    p.add_argument("--duration-tolerance", type=float, default=60.0, help="Tolerance in seconds for video duration matching")
-    p.add_argument("--max-video-duration", type=float, default=720.0, help="Max video duration in seconds (default 12min)")
+    p.add_argument("--duration-tolerance", type=float, default=3.0, help="Tolerance in seconds for video duration matching")
+    p.add_argument("--max-video-duration", type=float, default=34.0, help="Max video duration in seconds (34s 实测安全上限，38s OOM)")
     p.set_defaults(_spec_run=run)
 
 
@@ -192,13 +196,15 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
     visual_timer = P.ModuleCudaEventTimer()
     audio_timer = P.ModuleCudaEventTimer()
+    thinker_capture = P.ThinkerPrefillCapture()
+    llm_prefill_capture = P.LLMPrefillCudaEventCapture()
+
     if visual is not None:
         visual_timer.register(visual)
     audio_timer.register(audio)
-
-    prefill_capture = P.LLMPrefillCudaEventCapture()
+    thinker_capture.register(model.thinker)
     if llm is not None:
-        prefill_capture.register(llm)
+        llm_prefill_capture.register(llm)
 
     # 内存监控
     mem_monitor = None
@@ -310,22 +316,20 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
         token_stats = runner.get_token_stats(proc, full_inputs.get("input_ids"))
 
-        visual_timer.clear()
-        audio_timer.clear()
-        prefill_capture.clear()
-
         if mem_monitor is not None:
             mem_monitor.mark("generate")
 
-        ttft_ms = runner.run_generate_1token_ms(model, {k: v for k, v in full_inputs.items()})
+        # 使用统一计时逻辑
+        breakdown = runner.run_generate_with_breakdown(
+            model,
+            {k: v for k, v in full_inputs.items()},
+            visual_timer=visual_timer,
+            audio_timer=audio_timer,
+            thinker_capture=thinker_capture,
+            llm_prefill_capture=llm_prefill_capture,
+        )
 
-        visual_encoder_ms = float(sum(visual_timer.times)) if visual is not None else 0.0
-        audio_encoder_ms = float(sum(audio_timer.times))
-        llm_prefill_ms = float(prefill_capture.prefill_forward_ms) if llm is not None else None
-        llm_prefill_seq_len = int(prefill_capture.prefill_seq_len) if llm is not None else None
-
-        prefill_ms_for_other = float(llm_prefill_ms) if llm_prefill_ms is not None else 0.0
-        other_ms = float(max(0.0, float(ttft_ms) - float(visual_encoder_ms) - float(audio_encoder_ms) - prefill_ms_for_other))
+        llm_prefill_seq_len = int(llm_prefill_capture.prefill_seq_len) if llm is not None else None
 
         mem_row: Dict[str, Any] = {}
         if mem_monitor is not None:
@@ -340,12 +344,13 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
             "audio_feature_ms": float(audio_feature_ms),
             "preprocess_ms": float(av.extract_ms + base.pack_ms + audio_feature_ms),
             "mel_frames": int(mel_frames),
-            "visual_encoder_ms": float(visual_encoder_ms),
-            "audio_encoder_ms": float(audio_encoder_ms),
-            "llm_prefill_ms": llm_prefill_ms,
+            "visual_encoder_ms": breakdown["visual_encoder_ms"],
+            "audio_encoder_ms": breakdown["audio_encoder_ms"],
+            "prefill_ms": breakdown["prefill_ms"],    # = Embedding Merge + LLM Forward
+            "llm_prefill_ms": breakdown["llm_prefill_ms"],  # = 仅 LLM Forward
+            "others_ms": breakdown["others_ms"],      # = 调度开销
             "llm_prefill_seq_len": llm_prefill_seq_len,
-            "other_ms": float(other_ms),
-            "ttft_ms": float(ttft_ms),
+            "ttft_ms": breakdown["ttft_ms"],
             **token_stats,
             **mem_row,
         }
@@ -377,7 +382,11 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
     except Exception:
         pass
     try:
-        prefill_capture.remove()
+        thinker_capture.remove()
+    except Exception:
+        pass
+    try:
+        llm_prefill_capture.remove()
     except Exception:
         pass
     try:
@@ -400,16 +409,16 @@ def run(args: argparse.Namespace, runner: BenchmarkRunner) -> str:
 
 
 def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
-    """绝对值堆叠条形图"""
-    # 按时长分组取平均
+    """绝对值堆叠条形图 - 双X轴 (duration + visual_tokens)"""
+    # 按时长分组取平均，同时保留visual_tokens
     grouped = df.groupby(["sample_id", "duration", "category"], dropna=False).agg({
         "preprocess_ms": "mean",
         "visual_encoder_ms": "mean",
         "audio_encoder_ms": "mean",
-        "llm_prefill_ms": "mean",
-        "other_ms": "mean",
+        "prefill_ms": "mean",
         "ttft_ms": "mean",
-    }).reset_index().sort_values("duration")
+        "visual_tokens": "first",
+    }).reset_index().sort_values("visual_tokens")
 
     n = len(grouped)
     if n == 0:
@@ -421,11 +430,9 @@ def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
     fig, ax = plt.subplots(figsize=(14, 7))
 
     phases = [
-        ("preprocess_ms", "Preprocess", "#2ecc71"),
         ("visual_encoder_ms", "Visual Encoder", "#3498db"),
         ("audio_encoder_ms", "Audio Encoder", "#e67e22"),
-        ("llm_prefill_ms", "Prefill", "#e74c3c"),
-        ("other_ms", "Other/Decode", "#9b59b6"),
+        ("prefill_ms", "Prefill", "#e74c3c"),
     ]
 
     bottom = np.zeros(n)
@@ -434,13 +441,22 @@ def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
         ax.bar(x, vals, width, bottom=bottom, label=label, color=color)
         bottom += vals
 
-    # X 轴标签
-    labels = [f"{row['duration']:.0f}s\n({row['category']})" for _, row in grouped.iterrows()]
+    # 下方X轴: visual_tokens (主要排序依据)
+    labels_tok = [f"{int(row['visual_tokens'])}" for _, row in grouped.iterrows()]
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
-    ax.set_xlabel("Video Duration", fontsize=11)
+    ax.set_xticklabels(labels_tok, fontsize=9)
+    ax.set_xlabel("Visual Tokens", fontsize=11)
     ax.set_ylabel("TTFT (seconds)", fontsize=11)
-    ax.set_title("TTFT Breakdown by Video Duration\n(Absolute Time, Individual Cases)", fontsize=12)
+
+    # 上方X轴: duration
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    ax2.set_xticks(x)
+    labels_dur = [f"{row['duration']:.0f}s" for _, row in grouped.iterrows()]
+    ax2.set_xticklabels(labels_dur, fontsize=9)
+    ax2.set_xlabel("Video Duration (seconds)", fontsize=11)
+
+    ax.set_title("TTFT Breakdown by Visual Tokens\n(Dynamic Frame Sampling @ 2FPS)", fontsize=12, pad=20)
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(axis='y', alpha=0.3)
 
@@ -452,15 +468,15 @@ def _plot_individual_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
 
 
 def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
-    """百分比堆叠条形图（你导师要的那个图）"""
+    """百分比堆叠条形图 - 双X轴 (duration + visual_tokens)"""
     grouped = df.groupby(["sample_id", "duration", "category"], dropna=False).agg({
-        "preprocess_ms": "mean",
         "visual_encoder_ms": "mean",
         "audio_encoder_ms": "mean",
-        "llm_prefill_ms": "mean",
-        "other_ms": "mean",
+        "prefill_ms": "mean",
+        "others_ms": "mean",
         "ttft_ms": "mean",
-    }).reset_index().sort_values("duration")
+        "visual_tokens": "first",
+    }).reset_index().sort_values("visual_tokens")
 
     n = len(grouped)
     if n == 0:
@@ -472,11 +488,10 @@ def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
     fig, ax = plt.subplots(figsize=(14, 7))
 
     phases = [
-        ("preprocess_ms", "Preprocess", "#2ecc71"),
         ("visual_encoder_ms", "Visual Encoder", "#3498db"),
         ("audio_encoder_ms", "Audio Encoder", "#e67e22"),
-        ("llm_prefill_ms", "Prefill", "#e74c3c"),
-        ("other_ms", "Other/Decode", "#9b59b6"),
+        ("prefill_ms", "Prefill", "#e74c3c"),
+        ("others_ms", "Others", "#95a5a6"),
     ]
 
     bottom = np.zeros(n)
@@ -491,12 +506,22 @@ def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
         ax.bar(x, vals, width, bottom=bottom, label=label, color=color)
         bottom += vals
 
-    labels = [f"{row['duration']:.0f}s\n({row['category']})" for _, row in grouped.iterrows()]
+    # 下方X轴: visual_tokens (主要排序依据)
+    labels_tok = [f"{int(row['visual_tokens'])}" for _, row in grouped.iterrows()]
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=9)
-    ax.set_xlabel("Video Duration", fontsize=11)
+    ax.set_xticklabels(labels_tok, fontsize=9)
+    ax.set_xlabel("Visual Tokens", fontsize=11)
     ax.set_ylabel("Percentage of TTFT (%)", fontsize=11)
-    ax.set_title("TTFT Breakdown by Video Duration\n(Percentage, Individual Cases)", fontsize=12)
+
+    # 上方X轴: duration
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    ax2.set_xticks(x)
+    labels_dur = [f"{row['duration']:.0f}s" for _, row in grouped.iterrows()]
+    ax2.set_xticklabels(labels_dur, fontsize=9)
+    ax2.set_xlabel("Video Duration (seconds)", fontsize=11)
+
+    ax.set_title("TTFT Breakdown (%) by Visual Tokens\n(Dynamic Frame Sampling @ 2FPS)", fontsize=12, pad=20)
     ax.legend(loc="upper right", fontsize=9)
     ax.set_ylim(0, 100)
     ax.grid(axis='y', alpha=0.3)
@@ -511,11 +536,9 @@ def _plot_percentage_stacked_bar(df: pd.DataFrame, out_dir: str) -> None:
 def _save_summary(df: pd.DataFrame, out_dir: str) -> None:
     """保存汇总统计"""
     grouped = df.groupby(["duration", "category"], dropna=False).agg({
-        "preprocess_ms": "mean",
         "visual_encoder_ms": "mean",
         "audio_encoder_ms": "mean",
-        "llm_prefill_ms": "mean",
-        "other_ms": "mean",
+        "prefill_ms": "mean",
         "ttft_ms": "mean",
     }).reset_index().sort_values("duration")
 

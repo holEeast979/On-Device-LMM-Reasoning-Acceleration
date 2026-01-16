@@ -534,6 +534,114 @@ class ModuleCudaEventTimer:
         self._handles = []
 
 
+class ThinkerPrefillCapture:
+    """
+    Hook to capture Thinker forward time (Embedding Merge + LLM Forward).
+    
+    注册在 model.thinker 上，测量从 Thinker.forward() 开始到结束的 GPU 时间。
+    这包含：
+    - Embedding Merge (masked_scatter + get_rope_index)
+    - LLM Forward (self.model.forward)
+    
+    不包含 Visual Encoder 和 Audio Encoder（它们在 Thinker.forward 之前已完成）。
+    
+    用法：
+        thinker_capture = ThinkerPrefillCapture()
+        thinker_capture.register(model.thinker)
+        # ... generate ...
+        prefill_ms = thinker_capture.prefill_forward_ms
+    """
+    def __init__(self):
+        self.prefill_forward_ms = 0.0
+        self.prefill_seq_len = 0
+        self._handles = []
+        self._start_event = None
+        self._end_event = None
+        self._device = None
+        self._cur_is_prefill = False
+        self._cur_seq_len = 0
+
+    def register(self, thinker_module):
+        def get_module_device(m) -> torch.device:
+            try:
+                return next(m.parameters()).device
+            except StopIteration:
+                return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+
+        def pre_hook(module, args, kwargs):
+            # 获取 input_ids 或 inputs_embeds 来判断是否是 prefill
+            input_ids = kwargs.get("input_ids", None)
+            inputs_embeds = kwargs.get("inputs_embeds", None)
+            
+            # 从 args 中尝试获取
+            if input_ids is None and len(args) > 0:
+                for a in args:
+                    if isinstance(a, torch.Tensor) and a.ndim == 2:
+                        if a.dtype in (torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8):
+                            input_ids = a
+                            break
+            
+            input_ids_len = int(input_ids.shape[-1]) if input_ids is not None else 0
+            inputs_embeds_len = int(inputs_embeds.shape[1]) if inputs_embeds is not None else 0
+            seq_len = max(input_ids_len, inputs_embeds_len)
+            
+            is_prefill = (seq_len > 1)
+            
+            self._cur_is_prefill = bool(is_prefill)
+            self._cur_seq_len = int(seq_len)
+            
+            if not self._cur_is_prefill:
+                self._start_event = None
+                self._end_event = None
+                self._device = get_module_device(module)
+                return None
+            
+            device = get_module_device(module)
+            self._device = device
+            if device.type == "cuda":
+                with torch.cuda.device(device):
+                    self._start_event = torch.cuda.Event(enable_timing=True)
+                    self._end_event = torch.cuda.Event(enable_timing=True)
+                    self._start_event.record()
+            else:
+                self._start_event = None
+                self._end_event = None
+            return None
+
+        def post_hook(module, args, kwargs, output):
+            if not self._cur_is_prefill:
+                return None
+            if self._cur_seq_len <= 0:
+                return None
+            
+            device = self._device if self._device is not None else get_module_device(module)
+            if device.type != "cuda" or self._start_event is None or self._end_event is None:
+                return None
+            
+            with torch.cuda.device(device):
+                self._end_event.record()
+                self._end_event.synchronize()
+                elapsed = float(self._start_event.elapsed_time(self._end_event))
+            
+            if self._cur_seq_len >= int(self.prefill_seq_len):
+                self.prefill_forward_ms = float(elapsed)
+                self.prefill_seq_len = int(self._cur_seq_len)
+            return None
+
+        h1 = thinker_module.register_forward_pre_hook(pre_hook, with_kwargs=True)
+        h2 = thinker_module.register_forward_hook(post_hook, with_kwargs=True)
+        self._handles.extend([h1, h2])
+
+    def clear(self):
+        self.prefill_forward_ms = 0.0
+        self.prefill_seq_len = 0
+
+    def remove(self):
+        for h in self._handles:
+            h.remove()
+        self._handles = []
+
+
 class LLMSeqLenCapture:
     """Hook to capture max input sequence length seen by LLM during generate (prefill is the longest)."""
     def __init__(self):

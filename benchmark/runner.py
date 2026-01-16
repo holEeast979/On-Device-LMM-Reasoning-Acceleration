@@ -251,8 +251,49 @@ class BenchmarkRunner:
         out["feature_attention_mask"] = torch.ones((1, int(mel_frames)), device=model.device, dtype=torch.long)
         return out
 
-    def run_generate_1token_ms(self, model, inputs: Dict[str, Any]) -> float:
+    def run_generate_1token_ms(self, model, inputs: Dict[str, Any], *, use_cuda_event: bool = False) -> float:
+        """
+        测量生成 1 个 token 的时间 (TTFT)。
+        
+        Args:
+            model: 模型
+            inputs: 输入字典
+            use_cuda_event: 是否使用 CUDA Event 计时（默认 False）
+                - False: 使用 wall-clock 时间，端到端延迟（业界标准，用户体验）
+                - True: 仅测量 GPU kernel 执行时间（GPU 性能分析）
+        
+        Returns:
+            TTFT 时间（毫秒）
+        """
         self._sync_model_devices(model)
+        
+        if use_cuda_event and torch.cuda.is_available():
+            device = getattr(model, "device", None)
+            if device is None:
+                try:
+                    device = next(model.parameters()).device
+                except StopIteration:
+                    device = torch.device("cuda", torch.cuda.current_device())
+            
+            if device.type == "cuda":
+                with torch.cuda.device(device):
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    
+                    start_event.record()
+                    with torch.no_grad():
+                        model.generate(
+                            **inputs,
+                            max_new_tokens=1,
+                            do_sample=False,
+                            return_audio=False,
+                        )
+                    end_event.record()
+                    end_event.synchronize()
+                    
+                    return float(start_event.elapsed_time(end_event))
+        
+        # Fallback to wall-clock timing
         t0 = time.perf_counter()
         with torch.no_grad():
             model.generate(
@@ -286,4 +327,85 @@ class BenchmarkRunner:
             "audio_tokens": int(audio_n),
             "visual_tokens": int(vision_n),
             "total_tokens": int(total),
+        }
+
+    def run_generate_with_breakdown(
+        self,
+        model,
+        inputs: Dict[str, Any],
+        *,
+        visual_timer: Optional[P.ModuleCudaEventTimer] = None,
+        audio_timer: Optional[P.ModuleCudaEventTimer] = None,
+        thinker_capture: Optional[P.ThinkerPrefillCapture] = None,
+        llm_prefill_capture: Optional[P.LLMPrefillCudaEventCapture] = None,
+    ) -> Dict[str, float]:
+        """
+        统一计时逻辑：测量 TTFT 并返回详细的阶段分解。
+        
+        返回字段：
+        - ttft_ms: 整个 generate() 的 wall-clock 时间
+        - visual_encoder_ms: Visual Encoder GPU 时间 (CUDA Event)
+        - audio_encoder_ms: Audio Encoder GPU 时间 (CUDA Event)
+        - prefill_ms: Embedding Merge + LLM Forward (thinker_capture - visual - audio)
+        - llm_prefill_ms: 仅 LLM Forward (可选，用于细粒度分析)
+        - others_ms: 调度开销 = ttft - visual - audio - prefill
+        
+        计算公式：
+            prefill_ms = thinker_capture.prefill_forward_ms - visual_encoder_ms - audio_encoder_ms
+            others_ms = ttft_ms - visual_encoder_ms - audio_encoder_ms - prefill_ms
+        
+        注意：如果没有提供 thinker_capture，则 prefill_ms 用旧方法计算（包含 others）
+        """
+        # 清空计时器
+        if visual_timer is not None:
+            visual_timer.clear()
+        if audio_timer is not None:
+            audio_timer.clear()
+        if thinker_capture is not None:
+            thinker_capture.clear()
+        if llm_prefill_capture is not None:
+            llm_prefill_capture.clear()
+        
+        # 同步设备
+        self._sync_model_devices(model)
+        
+        # 测量 TTFT (wall-clock)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            model.generate(
+                **inputs,
+                max_new_tokens=1,
+                do_sample=False,
+                return_audio=False,
+            )
+        self._sync_model_devices(model)
+        ttft_ms = float((time.perf_counter() - t0) * 1000)
+        
+        # 收集 Encoder 时间
+        visual_encoder_ms = float(sum(visual_timer.times)) if visual_timer is not None else 0.0
+        audio_encoder_ms = float(sum(audio_timer.times)) if audio_timer is not None else 0.0
+        
+        # 收集 LLM Prefill 时间（仅 LLM forward）
+        llm_prefill_ms = float(llm_prefill_capture.prefill_forward_ms) if llm_prefill_capture is not None else None
+        
+        # 计算 Prefill 和 Others
+        if thinker_capture is not None:
+            # 新方法：精确分离 prefill 和 others
+            # thinker_forward 包含 visual + audio + embedding_merge + llm
+            # prefill = thinker - visual - audio = embedding_merge + llm
+            thinker_forward_ms = float(thinker_capture.prefill_forward_ms)
+            prefill_ms = max(0.0, thinker_forward_ms - visual_encoder_ms - audio_encoder_ms)
+            others_ms = max(0.0, ttft_ms - visual_encoder_ms - audio_encoder_ms - prefill_ms)
+        else:
+            # 旧方法：prefill 包含 others
+            prefill_ms = max(0.0, ttft_ms - visual_encoder_ms - audio_encoder_ms)
+            others_ms = None  # 无法分离
+        
+        return {
+            "ttft_ms": ttft_ms,
+            "visual_encoder_ms": visual_encoder_ms,
+            "audio_encoder_ms": audio_encoder_ms,
+            "prefill_ms": prefill_ms,
+            "llm_prefill_ms": llm_prefill_ms,
+            "others_ms": others_ms,
         }

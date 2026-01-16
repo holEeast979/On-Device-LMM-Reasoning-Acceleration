@@ -23,7 +23,7 @@ def build_common_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-samples", type=int, default=3)
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--warmup", type=int, default=0)
-    p.add_argument("--video-nframes", type=int, default=8)
+    p.add_argument("--video-nframes", type=int, default=None, help="Number of frames to sample from video. None=use model default (2 FPS, max 768 frames)")
     p.add_argument("--question", type=str, default=None)
     p.add_argument("--profile-mem", action="store_true", help="Record per-request GPU peak memory (allocated/reserved) with phase tags")
     p.add_argument("--mem-interval-ms", type=float, default=2.0, help="Sampling interval for --profile-mem (lower is more accurate but more overhead)")
