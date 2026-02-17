@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 1 收尾**：Video-MME 完整评估 + 消融实验。评估 Pipeline 已写好并 smoke test 通过，但 100 视频完整评估尚未跑完。
+**Phase 1 收尾**：Video-MME Sparse 完整评估已跑通（300/300, 0 errors, 59.0%）。待跑 Baseline 对照 + 消融实验。
 
 ---
 
@@ -40,7 +40,7 @@
 | Pipeline | `fasteromni/pipeline.py` | ✅ 完成 | baseline+sparse+sparse_no_audio 三模式 | — | — |
 | 评估器(EM) | `fasteromni/evaluator.py` | ✅ 完成 | NLTK 版 11/11 self-test 通过 | — | Video-MME 不需要 EM |
 | ActivityNet 评估 | `fasteromni/eval_accuracy.py` | ✅ 完成 | 50 样本消融跑通 | 仅 16 独立视频 | 不作为论文主实验 |
-| Video-MME 评估 | `fasteromni/eval_videomme.py` | 🟡 90% | smoke test 3 视频 9 题通过 | 100 视频完整评估未跑完 | **重跑完整评估（带实时进度）** |
+| Video-MME 评估 | `fasteromni/eval_videomme.py` | 🟡 95% | Sparse 300/300 跑通 | Baseline 未跑 | **跑 Baseline 对照** |
 | 消融脚本 | `fasteromni/run_ablation.py` | ✅ 完成 | ActivityNet 消融跑通 | — | 在 Video-MME 上重新消融 |
 
 ---
@@ -74,12 +74,35 @@
 
 **alpha 消融**：完全无影响。原因：GOP 中位数仅 5，5 选 3 时不同 alpha 选出相同集合。
 
-### Video-MME smoke test（3 视频 9 题）
+### Video-MME 完整评估（100 视频 300 题）
 
-| 模式 | Accuracy | Avg Gen(ms) | Avg VisTok |
-|------|----------|-------------|-----------|
-| baseline (32帧) | 66.7% | 2406 | 11520 |
-| sparse (kr=0.5) | 55.6% | 1079 | 4560 |
+**Sparse 模式 (keep_ratio=0.5, alpha=0.5, max_frames=32)**：
+
+| 类别 | 样本数 | 准确率 | 平均 Generate(ms) | 平均 VisTok | 平均 AudTok | 平均 TotalTok |
+|------|--------|--------|------------------|-------------|-------------|---------------|
+| Short | 108 | **69.4%** | 1,092 | 4,939 | 1,893 | 6,911 |
+| Medium | 90 | **57.8%** | 3,189 | 11,052 | 7,420 | 18,557 |
+| Long | 102 | **49.0%** | 3,138 | 10,737 | 7,502 | 18,337 |
+| **Overall** | **300** | **59.0%** | **2,417** | **8,744** | — | — |
+
+错误数：0（OOM 修复生效：max_frames 上限 + 音频截断到选中 GOP 时间范围）
+
+**与旧 Baseline 对比（Short 视频，唯一公平子集）**：
+
+| 指标 | Baseline | Sparse | 变化 |
+|------|----------|--------|------|
+| 准确率 | 75.0% | 69.4% | **-5.6pp** |
+| 延迟 | 2,162ms | 1,092ms | **1.98x 加速** |
+| Visual Tokens | 10,737 | 4,939 | **-54%** |
+| 整体准确率 | 62.0% | 59.0% | **-3.0pp** |
+
+⚠️ Baseline 详细 CSV 已丢失（被覆盖），Medium/Long 的 baseline 延迟数据缺失，需重跑。
+
+**按 Task Type 分析（Sparse, 弱点）**：
+- Counting Problem: 29.2%（稀疏丢帧对计数影响最大）
+- Temporal Reasoning: 30.8%（时序推理需要连续帧）
+- Information Synopsis: 82.4%（总结类任务对帧完整性要求低）
+- Spatial Reasoning: 100%（但仅 4 样本）
 
 ---
 
@@ -96,6 +119,41 @@
 
 ---
 
+## 待办事项
+
+### 紧急（Phase 1 收尾）
+
+| 优先级 | 任务 | 预估时间 | 命令参考 | 状态 |
+|--------|------|---------|---------|------|
+| **P0** | ~~Sparse 完整评估~~ | — | — | ✅ 已完成 (300/300, 59.0%) |
+| **P0** | **Baseline 完整评估** | ~2-3h | `python fasteromni/eval_videomme.py --modes baseline --max-frames 32` | ⏳ 待跑 |
+| **P0** | Baseline vs Sparse 完整对比分析 | ~30min | 手动分析 | ⏳ 等 Baseline |
+| **P0** | keep_ratio 消融 (0.2/0.3/0.5/0.7/0.9) | ~8-10h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32` | ⏳ 待跑 |
+| **P0** | 去音频消融 (sparse vs sparse_no_audio) | ~2-3h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32` | ⏳ 待跑 |
+| **P1** | 输出论文级表格 + Pareto 曲线图 | ~1h | 消融完成后生成 | ⏳ |
+
+### 中期（Phase 2）
+
+| 任务 | 说明 | 依赖 |
+|------|------|------|
+| P/B 帧选择策略 | 在 GOP 内选关键帧，解决"只取 I 帧太粗"的问题 | Phase 1 数据确认稀疏化有效 |
+| 选择策略软切换 | 方差在 [0.01, 0.05] 区间时按比例混合 TopK 和 Uniform，替代当前硬阈值 | 无 |
+| 加权均匀采样 | Uniform 策略中引入分数微调，基本等间隔但偏向分数略高的 GOP | 无 |
+| 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
+| alpha 在长视频验证 | 长视频 GOP 数量多（>20），alpha 排序差异能影响选择结果 | Video-MME medium/long 数据 |
+
+### 远期（Phase 3）
+
+| 任务 | 说明 |
+|------|------|
+| 多 benchmark 交叉验证 | Video-MME + ActivityNet-QA (GPT-judge) |
+| 与 naive 方法对比 | uniform frame sampling / random sampling vs AV-LRM |
+| Ring Buffer CPU/GPU 异步预取 | 批量场景隐藏预处理延迟 |
+| Patch 级稀疏化 | 帧内部哪些区域重要 |
+| 长视频能力验证 | sparse 模式处理 baseline OOM 的长视频 |
+
+---
+
 ## 已知问题
 
 - [ ] **音频"兜底"效应未验证**：kr=0.2 不掉精度可能是因为完整音频 token 在补偿，需去音频消融分离贡献
@@ -103,6 +161,9 @@
 - [ ] **I 帧解码是全解码**：`container.decode()` 遍历全帧再过滤 keyframe，CPU 侧无加速（但不是瓶颈）
 - [ ] **ActivityNet-QA 采样 bug**：按 QA 对采样而非按视频，50 题仅 16 独立视频（已切换到 Video-MME 规避）
 - [ ] **Video-MME "short" 实际 52-111s**：远超预期，baseline 需限帧
+- [x] **Sparse OOM 修复**：max_frames=32 上限 + 音频截断到选中 GOP 时间范围，300/300 全部跑通
+- [ ] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录），但旧 Baseline 详细 CSV 已丢失
+- [ ] **Baseline 完整评估待跑**：需要 Medium/Long 的 baseline 延迟数据来计算加速比
 
 ---
 
@@ -118,37 +179,6 @@
 | 6 | 评估函数 | ✅ | 切换到 Video-MME 选择题 |
 | 7 | 样本量+顺序偏置 | ⏳ | Video-MME 300 题可解决 |
 | 8 | 阈值写死 | ⏳ | 低优先级 |
-
----
-
-## 待办事项
-
-### 紧急（Phase 1 收尾）
-
-| 优先级 | 任务 | 预估时间 | 命令参考 |
-|--------|------|---------|---------|
-| **P0** | Video-MME 完整评估 (100 视频 300 题, baseline+sparse) | ~30-60min | `python fasteromni/eval_videomme.py --max-videos 0 --modes baseline sparse --max-frames 32` |
-| **P0** | Video-MME keep_ratio 消融 (0.2/0.3/0.5/0.7/0.9) | ~2h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32` |
-| **P0** | 去音频消融 (sparse vs sparse_no_audio) | ~30min | `python fasteromni/eval_videomme.py --modes sparse sparse_no_audio --max-frames 32` |
-| **P1** | 输出论文级表格 + Pareto 曲线图 | ~1h | 消融完成后生成 |
-
-### 中期（Phase 2）
-
-| 任务 | 说明 | 依赖 |
-|------|------|------|
-| P/B 帧选择策略 | 在 GOP 内选关键帧，解决"只取 I 帧太粗"的问题 | Phase 1 数据确认稀疏化有效 |
-| 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
-| alpha 在帧级验证 | 帧级选择下 alpha 是否有区分度 | P/B 帧策略实现后 |
-
-### 远期（Phase 3）
-
-| 任务 | 说明 |
-|------|------|
-| 多 benchmark 交叉验证 | Video-MME + ActivityNet-QA (GPT-judge) |
-| 与 naive 方法对比 | uniform frame sampling / random sampling vs AV-LRM |
-| Ring Buffer CPU/GPU 异步预取 | 批量场景隐藏预处理延迟 |
-| Patch 级稀疏化 | 帧内部哪些区域重要 |
-| 长视频能力验证 | sparse 模式处理 baseline OOM 的长视频 |
 
 ---
 
@@ -175,6 +205,8 @@
 
 ## 变更日志
 
+- **[2.18]** Video-MME Sparse 完整评估完成：300/300, 59.0%, 0 errors。与旧 Baseline 对比：Short 加速 1.98x (-5.6pp)，整体 -3.0pp。发现 Counting/Temporal Reasoning 是弱点。修复 eval 脚本：每个 mode 独立保存到子目录（baseline/, sparse/），防止互相覆盖。Sparse 数据已备份。OOM 修复验证有效（max_frames + 音频截断）。
+- **[2.17]** PROGRESS.md 创建 + Git push (17 文件 3346 行)。eval_videomme.py 优化：每条实时进度 + 120s 超时保护 + 增量 CSV 写入。pipeline.py 修复：max_frames 上限 + 音频截断到选中 GOP 时间范围（解决 medium/long OOM）。Windsurf Rules 配置。中期待办增加：选择策略软切换、加权均匀采样。
 - **[2.16]** Video-MME 评估 Pipeline 完成 (`eval_videomme.py`)，smoke test 3 视频 9 题通过。Baseline OOM 问题修复 (max_frames=32)。Pipeline 增加 `skip_audio` 参数支持去音频消融。
 - **[2.16]** GPT Code Review 8 个问题修了 6 个。NLTK 评估器升级完成。ActivityNet-QA 消融完成（发现 alpha 无影响、音频兜底效应）。
 - **[2.15]** 串行 Pipeline 跑通：GOP 解析 → AV-LRM 打分 → I 帧解码 → 模型推理。首次 TTFT 对比完成。

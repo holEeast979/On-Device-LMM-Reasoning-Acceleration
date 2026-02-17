@@ -218,6 +218,8 @@ class SparseInferencePipeline:
         variance_threshold: float = 0.02,
         min_gop_frames: int = 10,
         skip_audio: bool = False,
+        max_frames: int = 32,
+        max_audio_sec: float = 0,
     ) -> PipelineResult:
         """
         稀疏化推理：GOP 解析 → AV-LRM 打分 → I 帧解码 → 推理。
@@ -266,6 +268,10 @@ class SparseInferencePipeline:
             # === Step 4: I 帧解码 ===
             t0 = time.perf_counter()
             i_frames, decode_ms = decode_i_frames(video_path, scored_gops)
+            # 如果 I 帧数超过 max_frames，等间隔降采样
+            if max_frames > 0 and len(i_frames) > max_frames:
+                indices = np.linspace(0, len(i_frames) - 1, max_frames).astype(int)
+                i_frames = [i_frames[i] for i in indices]
             result.i_frame_decode_ms = decode_ms
             result.num_frames_input = len(i_frames)
             result.preprocess_ms = result.gop_parse_ms + result.audio_extract_ms + \
@@ -325,8 +331,22 @@ class SparseInferencePipeline:
             video_ele = {"type": "video", "video": str(video_path)}
             conversation = [{"role": "user", "content": [video_ele, {"type": "text", "text": question}]}]
 
-            # 音频直接传入 processor（生成音频占位 token + 特征）
-            # skip_audio=True 时不传音频，用于去音频消融实验
+            # 音频截断：避免长视频音频 token 过多导致 OOM
+            # max_audio_sec=0 表示自动匹配选中帧的时间跨度
+            if audio_waveform is not None and not skip_audio:
+                if max_audio_sec > 0:
+                    max_samples = int(max_audio_sec * sr)
+                else:
+                    # 自动计算：取选中 GOP 的最大结束时间
+                    selected = [sg for sg in scored_gops if sg.selected]
+                    if selected:
+                        max_end = max(sg.gop.end_time_sec or 0 for sg in selected)
+                        max_samples = int((max_end + 1.0) * sr)  # +1s 余量
+                    else:
+                        max_samples = len(audio_waveform)
+                if len(audio_waveform) > max_samples:
+                    audio_waveform = audio_waveform[:max_samples]
+
             audio_arg = None if skip_audio else ([audio_waveform] if audio_waveform is not None else None)
             text = proc.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
             inputs = proc(

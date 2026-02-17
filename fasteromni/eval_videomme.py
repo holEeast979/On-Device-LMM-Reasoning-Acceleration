@@ -22,6 +22,7 @@ import json
 import os
 import re
 import random
+import signal
 import sys
 import time
 from collections import defaultdict
@@ -181,6 +182,21 @@ class EvalRecord:
     error: str = ""
 
 
+class _Timeout:
+    """单条推理超时保护（仅 Linux）"""
+    def __init__(self, seconds: int = 120):
+        self.seconds = seconds
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self._handler)
+        signal.alarm(self.seconds)
+        return self
+    def __exit__(self, *args):
+        signal.alarm(0)
+    @staticmethod
+    def _handler(signum, frame):
+        raise TimeoutError("Single inference timed out")
+
+
 def run_single(
     pipe: SparseInferencePipeline,
     sample: VideoMMESample,
@@ -189,6 +205,7 @@ def run_single(
     alpha: float = 0.5,
     max_new_tokens: int = 16,
     max_frames: int = 64,
+    timeout_sec: int = 120,
 ) -> EvalRecord:
     """运行单条 QA 评估"""
     prompt = format_mcq_prompt(sample.question, sample.options)
@@ -205,37 +222,43 @@ def run_single(
     )
 
     try:
-        if mode == "baseline":
-            r = pipe.run_baseline(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
-        elif mode == "sparse":
-            r = pipe.run_sparse(
-                sample.video_path, prompt, max_new_tokens,
-                alpha=alpha, keep_ratio=keep_ratio,
-            )
-        elif mode == "sparse_no_audio":
-            r = pipe.run_sparse(
-                sample.video_path, prompt, max_new_tokens,
-                alpha=alpha, keep_ratio=keep_ratio,
-                skip_audio=True,
-            )
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
+        with _Timeout(timeout_sec):
+            if mode == "baseline":
+                r = pipe.run_baseline(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
+            elif mode == "sparse":
+                r = pipe.run_sparse(
+                    sample.video_path, prompt, max_new_tokens,
+                    alpha=alpha, keep_ratio=keep_ratio,
+                    max_frames=max_frames,
+                )
+            elif mode == "sparse_no_audio":
+                r = pipe.run_sparse(
+                    sample.video_path, prompt, max_new_tokens,
+                    alpha=alpha, keep_ratio=keep_ratio,
+                    skip_audio=True,
+                    max_frames=max_frames,
+                )
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
 
-        if r.error:
-            record.error = r.error
-        else:
-            record.pred_raw = r.output_text
-            record.pred_answer = extract_answer_letter(r.output_text)
-            record.correct = (record.pred_answer == record.gt_answer)
-            record.generate_ms = r.generate_ms
-            record.total_ms = r.total_ms
-            record.visual_tokens = r.visual_tokens
-            record.audio_tokens = r.audio_tokens
-            record.total_tokens = r.total_tokens
-            record.num_frames = r.num_frames_input
+            if r.error:
+                record.error = r.error
+            else:
+                record.pred_raw = r.output_text
+                record.pred_answer = extract_answer_letter(r.output_text)
+                record.correct = (record.pred_answer == record.gt_answer)
+                record.generate_ms = r.generate_ms
+                record.total_ms = r.total_ms
+                record.visual_tokens = r.visual_tokens
+                record.audio_tokens = r.audio_tokens
+                record.total_tokens = r.total_tokens
+                record.num_frames = r.num_frames_input
 
     except torch.cuda.OutOfMemoryError:
         record.error = "OOM"
+        pipe._clear_gpu()
+    except TimeoutError:
+        record.error = "TIMEOUT"
         pipe._clear_gpu()
     except Exception as e:
         record.error = str(e)
@@ -247,6 +270,14 @@ def run_single(
 
 import torch
 
+_CSV_FIELDNAMES = [
+    "question_id", "video_file_id", "duration", "domain", "task_type",
+    "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
+    "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
+    "num_frames", "error", "pred_raw",
+]
+
+
 def run_evaluation(
     pipe: SparseInferencePipeline,
     samples: List[VideoMMESample],
@@ -255,8 +286,18 @@ def run_evaluation(
     alpha: float = 0.5,
     max_new_tokens: int = 16,
     max_frames: int = 64,
+    incremental_csv: str = "",
 ) -> List[EvalRecord]:
     """运行一组评估"""
+    # 增量 CSV 写入：每条结果实时保存，防止中断丢数据
+    csv_writer = None
+    csv_file = None
+    if incremental_csv:
+        csv_file = open(incremental_csv, "a", newline="")
+        csv_writer = csv.DictWriter(csv_file, fieldnames=_CSV_FIELDNAMES)
+        if os.path.getsize(incremental_csv) == 0:
+            csv_writer.writeheader()
+
     records = []
     correct = 0
     total = 0
@@ -265,6 +306,11 @@ def run_evaluation(
     for i, sample in enumerate(samples):
         rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames)
         records.append(rec)
+
+        # 实时写入 CSV
+        if csv_writer:
+            csv_writer.writerow({k: getattr(rec, k) for k in _CSV_FIELDNAMES})
+            csv_file.flush()
 
         if rec.error:
             errors += 1
@@ -275,11 +321,13 @@ def run_evaluation(
             mark = "✓" if rec.correct else "✗"
             status = f"{mark} pred={rec.pred_answer} gt={rec.gt_answer}"
 
-        # 每 10 条或最后一条输出进度
-        if (i + 1) % 10 == 0 or i == len(samples) - 1:
-            acc = correct / total * 100 if total > 0 else 0
-            print(f"  [{i+1}/{len(samples)}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
-                  f"| {sample.duration} {status}", flush=True)
+        # 每条都输出进度（方便 tmux 实时查看）
+        acc = correct / total * 100 if total > 0 else 0
+        print(f"  [{i+1}/{len(samples)}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
+              f"| {sample.duration:7s} | {sample.video_file_id[:15]:15s} | {status}", flush=True)
+
+    if csv_file:
+        csv_file.close()
 
     return records
 
@@ -419,24 +467,36 @@ def main():
     all_records = []
     all_summaries = []
 
+    # 增量 CSV 路径
+    os.makedirs(args.out_dir, exist_ok=True)
+
     if args.sweep == "none":
-        # 单配置评估
+        # 单配置评估 — 每个 mode 独立保存到子目录
         for mode in args.modes:
+            mode_dir = os.path.join(args.out_dir, mode)
+            os.makedirs(mode_dir, exist_ok=True)
+            inc_csv = os.path.join(mode_dir, f"{mode}_details.csv")
             print(f"\n{'='*60}")
             print(f"Running {mode.upper()} ({len(samples)} samples)")
+            print(f"  Results → {mode_dir}")
             print(f"{'='*60}")
             records = run_evaluation(
                 pipe, samples, mode,
                 keep_ratio=args.keep_ratio, alpha=args.alpha,
                 max_new_tokens=args.max_new_tokens,
                 max_frames=args.max_frames,
+                incremental_csv=inc_csv,
             )
             all_records.extend(records)
-            summary = summarize_records(records, label=f"{mode}(kr={args.keep_ratio})")
+            label = f"{mode}(kr={args.keep_ratio})" if mode != "baseline" else "baseline"
+            summary = summarize_records(records, label=label)
             all_summaries.append(summary)
+            # 每个 mode 独立保存
+            save_results(records, [summary], mode_dir, tag=mode)
 
         print_summary(all_summaries)
-        save_results(all_records, all_summaries, args.out_dir, tag="eval")
+        # 同时保存汇总到根目录
+        save_results(all_records, all_summaries, args.out_dir, tag="combined")
 
     elif args.sweep == "keep_ratio":
         # keep_ratio 消融
