@@ -214,6 +214,7 @@
 - **[2.16] GPT Code Review**：8 个问题，已修 6 个。核心发现：音频链路断裂、TTFT 口径错误。修复后加速比从 2.39x 升至 3.77x（因为修前 max_new_tokens=32 掩盖了 prefill 差异）。
 - **[2.15] Claude 架构建议**：先串行跑通再拆并行，Phase 1-4 路线图（已大部分落地）。
 - **[2.15] GPT 执行清单**：当天完成 GOP 解析 + 串行 Baseline + 稀疏化初测。
+- **[2.18] Jarvis 讨论 - content-adaptive sparsification**：结论是 Phase 2 优化项，不是核心贡献。理由：①kr 消融已证明精度对 kr 不敏感，动态调 kr 收益空间小 ②alpha 在短视频无区分度 ③需要额外分类器判断视频类型，增加复杂度 ④论文核心应简洁，固定 kr 就能讲清框架价值。定位：稀疏化 pipeline 的一个可选优化环节，Phase 2 用于优化逐视频波动大的 tail case。
 - **[2.18] Jarvis 讨论 - GOP 粒度上限**：短视频 GOP 中位数仅 5，alpha 和打分公式无区分度，这是 H.264 编码特性决定的已知限制。但不影响主线贡献：加速收益来自"砍掉多少 token"而非"选哪几个 GOP"，精度对 kr 不敏感也印证了这一点。GOP 级筛选对长视频（GOP 100+）有足够选择空间，打分公式和 alpha 预期有效。短视频暴露的粒度不足问题引出 Phase 2 方向：帧级选择（GOP 内选 P/B 帧），在更细粒度上优化短视频筛选。
 - **[2.18] Jarvis 讨论 - M/L 视频 sparse 失效分析**：由于硬件显存约束（32GB），M/L 视频必须加 max_frames=32 限制，导致 sparse 选完 GOP 后 I 帧数仍超上限被截断，与 baseline 完全一致。但反过来看，这恰好是 sparse 的价值所在：结合稀疏化可以提高 max_frames 上限（如 64 甚至更高）而不 OOM，从而让端侧设备支持更长视频。这是"稀疏化扩展能力边界"的贡献点，待 P1 #3（Sparse@64 + Baseline@64 OOM 验证）实验确认。
 - **[2.18] Jarvis 讨论 - Prefill 53% "Other" 开销已定性**：回溯 1 月初 10 视频 TTFT 分解实验（1.6 日后进展汇总），确认 Others 是**固定开销（Fixed Overhead）**，$R^2=0.04$，与 token 数量无相关性。具体来源：①PyTorch/HF 框架调度开销（generate 调用链、模型初始化）②CUDA context + kernel launch ③内存分配器预热 + KV cache 初始化 ④CPU-GPU 同步等待（Wall-clock 计时包含）⑤Python GIL 开销。vLLM 对比实验已验证可压缩此部分。注意：换了 Qwen2.5-Omni + FasterOmni pipeline 后 53% 这个具体数字可能变化，但"固定开销"的定性结论不变。此问题可从待探讨列表划掉。
@@ -238,7 +239,7 @@
 - [ ] **音频兜底假说**：如果去掉音频后 kr=0.2 准确率暴跌，说明 GOP 稀疏化本身价值不大？还是说"利用完整音频弥补视觉损失"本身就是一个有价值的设计？
 - [x] **GOP 粒度上限**：H.264 短视频 GOP 中位数仅 5，这是编码特性决定的。帧级选择（每 GOP 内选帧）能否让 alpha 参数发挥价值？→ 已讨论，见外部反馈 [2.18]
 - [ ] **论文故事线**：选"音视频联合稀疏化框架"还是"GOP 感知推理加速"？前者差异化更强但需要证明音频的参与确实有用。
-- [ ] **content-adaptive sparsification**：根据视频类型（风景/运动/对话）动态调整 kr 和 alpha，这是 Phase 2 还是论文核心贡献？
+- [x] **content-adaptive sparsification**：根据视频类型（风景/运动/对话）动态调整 kr 和 alpha，这是 Phase 2 还是论文核心贡献？→ 已讨论，见外部反馈 [2.18]
 - [x] **Video-MME vs ActivityNet-QA**：长视频（medium/long）对稀疏化的压力是否会暴露短视频掩盖的问题？→ 已讨论，见外部反馈 [2.18]
 - [x] **Prefill 中 53% "Other" 开销**：之前 token-scaling 实验发现 ViT 17% + Audio 13% + LLM 17% + Other 53%。这个 Other 能否进一步分解？→ 已定性为固定开销，见外部反馈 [2.18]
 
