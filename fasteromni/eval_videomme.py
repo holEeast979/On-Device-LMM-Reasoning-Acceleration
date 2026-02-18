@@ -438,29 +438,24 @@ class EvalRecord:
 
 class _Timeout:
     """
-    单条推理超时保护（watchdog 线程版）。
+    单条推理超时保护（内核级）。
 
-    SIGALRM 无法打断 C 扩展（torchvision/av/librosa 等），
-    改用 threading.Timer + os._exit(1) 作为硬杀手段。
-    os._exit 是直接系统调用，能终止任何状态的进程。
-    配合增量 CSV 写入，已完成的数据不会丢失。
+    threading.Timer 无法工作：GIL 被 C 扩展独占时 Python 线程全部阻塞。
+    signal.SIG_DFL 方案：SIGALRM 由内核投递，SIG_DFL 直接终止进程。
+    完全绕过 GIL / Python 解释器，100% 可靠。
+    配合增量 CSV（已 flush），已完成数据不丢失。
     """
     def __init__(self, seconds: int = 120):
         self.seconds = seconds
-        self._timer = None
+        self._old_handler = None
     def __enter__(self):
-        import threading
-        self._timer = threading.Timer(self.seconds, self._nuke)
-        self._timer.daemon = True
-        self._timer.start()
+        self._old_handler = signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.alarm(self.seconds)
         return self
     def __exit__(self, *args):
-        if self._timer:
-            self._timer.cancel()
-    @staticmethod
-    def _nuke():
-        print(f"\n[WATCHDOG] Process stuck for too long, force-killing with os._exit(1)", flush=True)
-        os._exit(1)
+        signal.alarm(0)
+        if self._old_handler is not None:
+            signal.signal(signal.SIGALRM, self._old_handler)
 
 
 def run_single(
