@@ -507,27 +507,33 @@ def main():
         keep_ratios = [0.2, 0.3, 0.5, 0.7, 0.9]
 
         # baseline 只跑一次
+        inc_csv_base = os.path.join(args.out_dir, "baseline_inc.csv")
         print(f"\n{'='*60}")
         print(f"Running BASELINE ({len(samples)} samples)")
+        print(f"  Incremental CSV → {inc_csv_base}")
         print(f"{'='*60}")
         base_records = run_evaluation(
             pipe, samples, "baseline",
             max_new_tokens=args.max_new_tokens,
             max_frames=args.max_frames,
+            incremental_csv=inc_csv_base,
         )
         all_records.extend(base_records)
         base_summary = summarize_records(base_records, label="baseline")
         all_summaries.append(base_summary)
 
         for kr in keep_ratios:
+            inc_csv_kr = os.path.join(args.out_dir, f"sparse_kr{kr}_inc.csv")
             print(f"\n{'='*60}")
             print(f"Running SPARSE kr={kr} ({len(samples)} samples)")
+            print(f"  Incremental CSV → {inc_csv_kr}")
             print(f"{'='*60}")
             records = run_evaluation(
                 pipe, samples, "sparse",
                 keep_ratio=kr, alpha=args.alpha,
                 max_new_tokens=args.max_new_tokens,
                 max_frames=args.max_frames,
+                incremental_csv=inc_csv_kr,
             )
             all_records.extend(records)
             summary = summarize_records(records, label=f"sparse(kr={kr})")
