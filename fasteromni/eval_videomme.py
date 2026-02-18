@@ -16,6 +16,114 @@ Usage:
 """
 from __future__ import annotations
 
+# === Monkey-patch: 防止音频提取死锁 ===
+#
+# 死锁根因（两个独立阻塞点）：
+#   1. process_audio_info() → _check_if_video_has_audio() → av.open() 无超时
+#   2. process_audio_info() → librosa.load(video_path) → audioread → ffmpeg 子进程挂死
+#
+# 修复策略：
+#   - 替换 librosa.load 为 subprocess+timeout 版本（兜底）
+#   - 替换 process_audio_info 为完全绕过 av.open/librosa 的安全版本（根治）
+#
+import librosa
+import subprocess
+import numpy as np
+import os
+
+_SAFE_AUDIO_SR = 16000
+_SAFE_TIMEOUT = 30  # seconds
+
+def _safe_extract_audio(path: str, sr: int = _SAFE_AUDIO_SR,
+                        offset: float = 0.0, duration: float = None) -> np.ndarray:
+    """用 subprocess ffmpeg 提取音频，带超时保护。失败返回 0.1s 静音。"""
+    try:
+        cmd = ["ffmpeg", "-y"]
+        if offset > 0:
+            cmd += ["-ss", str(offset)]
+        cmd += ["-i", path, "-vn", "-acodec", "pcm_f32le",
+                "-ar", str(sr), "-ac", "1", "-f", "f32le", "pipe:1"]
+        if duration is not None:
+            cmd += ["-t", str(duration)]
+        r = subprocess.run(cmd, capture_output=True, timeout=_SAFE_TIMEOUT)
+        if r.returncode == 0 and len(r.stdout) > 0:
+            return np.frombuffer(r.stdout, dtype=np.float32)
+    except subprocess.TimeoutExpired:
+        print(f"[WARN] ffmpeg audio extraction timeout ({_SAFE_TIMEOUT}s) for {path}", flush=True)
+    except Exception as e:
+        print(f"[WARN] ffmpeg audio extraction failed: {e}", flush=True)
+    return np.zeros(int(sr * 0.1), dtype=np.float32)
+
+
+# 1. 替换 librosa.load（兜底，防止任何其他地方调用原始 librosa.load）
+_original_librosa_load = librosa.load
+
+def _safe_librosa_load(path, sr=22050, mono=True, offset=0.0, duration=None, **kwargs):
+    """带超时的 librosa.load 替代"""
+    if isinstance(path, np.ndarray):
+        return _original_librosa_load(path, sr=sr, mono=mono, offset=offset, duration=duration, **kwargs)
+    if isinstance(path, str) and not path.startswith(("http://", "https://", "data:")):
+        return _safe_extract_audio(path, sr=sr, offset=offset, duration=duration), sr
+    return _original_librosa_load(path, sr=sr, mono=mono, offset=offset, duration=duration, **kwargs)
+
+librosa.load = _safe_librosa_load
+
+
+# 2. 替换 process_audio_info（根治：完全绕过 av.open 和 librosa.load）
+def _safe_process_audio_info(conversations, use_audio_in_video):
+    """
+    安全版 process_audio_info，绕过所有可能挂死的 C 扩展调用。
+
+    原版死锁点：
+      - _check_if_video_has_audio() → av.open() 无超时
+      - librosa.load(video_path) → audioread.ffdec.FFmpegAudioFile → ffmpeg 子进程挂死
+    """
+    audios = []
+    if isinstance(conversations[0], dict):
+        conversations = [conversations]
+    for conversation in conversations:
+        for message in conversation:
+            if not isinstance(message["content"], list):
+                continue
+            for ele in message["content"]:
+                if ele["type"] == "audio":
+                    path = ele.get("audio", ele.get("audio_url"))
+                    if path is None:
+                        raise ValueError(f"Unknown audio {ele}")
+                    audio_start = ele.get("audio_start", 0.0)
+                    audio_end = ele.get("audio_end", None)
+                    if isinstance(path, np.ndarray):
+                        audios.append(
+                            path[int(_SAFE_AUDIO_SR * audio_start):
+                                 None if audio_end is None else int(_SAFE_AUDIO_SR * audio_end)]
+                        )
+                    else:
+                        dur = (audio_end - audio_start) if audio_end is not None else None
+                        audios.append(_safe_extract_audio(path, sr=_SAFE_AUDIO_SR,
+                                                          offset=audio_start, duration=dur))
+                elif use_audio_in_video and ele["type"] == "video":
+                    path = ele.get("video", ele.get("video_url"))
+                    if path is None:
+                        raise ValueError(f"Unknown video {ele}")
+                    audio_start = ele.get("video_start", 0.0)
+                    audio_end = ele.get("video_end", None)
+                    dur = (audio_end - audio_start) if audio_end is not None else None
+                    audios.append(_safe_extract_audio(path, sr=_SAFE_AUDIO_SR,
+                                                      offset=audio_start, duration=dur))
+    if len(audios) == 0:
+        audios = None
+    return audios
+
+# 注入到所有引用点
+import qwen_omni_utils.v2_5.audio_process as _ap_mod
+import qwen_omni_utils.v2_5 as _v25_mod
+import qwen_omni_utils as _qu_mod
+_ap_mod.process_audio_info = _safe_process_audio_info
+_v25_mod.process_audio_info = _safe_process_audio_info
+if hasattr(_qu_mod, 'process_audio_info'):
+    _qu_mod.process_audio_info = _safe_process_audio_info
+# === End monkey-patch ===
+
 import argparse
 import csv
 import json

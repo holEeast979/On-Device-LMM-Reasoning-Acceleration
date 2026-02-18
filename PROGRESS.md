@@ -222,3 +222,7 @@
 - **[2.16]** Video-MME 评估 Pipeline 完成 (`eval_videomme.py`)，smoke test 3 视频 9 题通过。Baseline OOM 问题修复 (max_frames=32)。Pipeline 增加 `skip_audio` 参数支持去音频消融。
 - **[2.16]** GPT Code Review 8 个问题修了 6 个。NLTK 评估器升级完成。ActivityNet-QA 消融完成（发现 alpha 无影响、音频兜底效应）。
 - **[2.15]** 串行 Pipeline 跑通：GOP 解析 → AV-LRM 打分 → I 帧解码 → 模型推理。首次 TTFT 对比完成。
+- **[2.18 PM] [Jarvis 报告]** **BUG: 音频提取死锁导致实验卡死**。kr 消融实验两次卡死（23/108 和 96/108），GPU 0% 功耗 11W，进程 Sleep 在 futex_wait_queue_me。→ ✅ 已修复，见下方。
+- **[2.18 PM] [Jarvis 临时修复]** pipeline.py:354 `use_audio_in_video=True→False`。→ ❌ 已还原。此修改会破坏 `replace_multimodal_special_tokens` 中 video+audio token 的交错拼接逻辑，影响实验结果一致性。
+- **[2.18 PM] [Jarvis 分析]** 死锁根因定位：`process_audio_info()` 中 `_check_if_video_has_audio()→av.open()` 和 `librosa.load()→audioread.ffdec.FFmpegAudioFile()` 两个阻塞点。→ ✅ 分析正确，已采纳方案(2)。
+- **[2.18 PM] [Windsurf 修复]** **音频提取死锁根治**。追踪完整调用链确认：processor `__call__` **不调用** `process_audio_info`（Jarvis 此处判断有误），死锁仅发生在 baseline 路径 `process_mm_info()→process_audio_info()` 中。修复方案：在 eval_videomme.py 开头 monkey-patch `process_audio_info` 为安全版本，完全绕过 `av.open` 和 `librosa.load/audioread`，改用 `subprocess.run(ffmpeg, timeout=30)` 提取音频。同时保留 `librosa.load` monkey-patch 作为兜底。注入到 `qwen_omni_utils.v2_5.audio_process`、`qwen_omni_utils.v2_5`、`qwen_omni_utils` 三个模块引用点，确保 `process_mm_info` 的 `LOAD_GLOBAL` 指令找到安全版本。Smoke test 通过：3 视频 54 条推理（baseline + 5 kr 值），0 errors，无卡死。
