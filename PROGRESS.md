@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 1 收尾**：Baseline + Sparse 完整评估均已完成（各 300/300, 0 errors）。Short 视频 2x 加速 -5.6pp 是核心成果。**kr 消融正在跑**（tmux eval session），待跑去音频消融。死锁 bug 已修复（见已知问题 #11）。
+**Phase 1 收尾**：Baseline + Sparse + kr 消融均已完成。**kr 消融核心发现：精度对 kr 不敏感**（kr=0.2~0.9 准确率 68.5%~70.4%），kr=0.2 即可实现 3.7x 加速仅 -5.5pp。待跑去音频消融（#2）。死锁 bug 已修复（SIG_DFL 内核级 watchdog + 自动恢复）。
 
 ---
 
@@ -40,7 +40,7 @@
 | Pipeline | `fasteromni/pipeline.py` | ✅ 完成 | baseline+sparse+sparse_no_audio 三模式 | — | — |
 | 评估器(EM) | `fasteromni/evaluator.py` | ✅ 完成 | NLTK 版 11/11 self-test 通过 | — | Video-MME 不需要 EM |
 | ActivityNet 评估 | `fasteromni/eval_accuracy.py` | ✅ 完成 | 50 样本消融跑通 | 仅 16 独立视频 | 不作为论文主实验 |
-| Video-MME 评估 | `fasteromni/eval_videomme.py` | ✅ 完成 | Baseline+Sparse 300/300 跑通 | 死锁已修 | kr 消融进行中 |
+| Video-MME 评估 | `fasteromni/eval_videomme.py` | ✅ 完成 | Baseline+Sparse 300/300, kr消融 6×108 | 死锁已修 | 去音频消融 |
 | 消融脚本 | `fasteromni/run_ablation.py` | ✅ 完成 | ActivityNet 消融跑通 | — | 在 Video-MME 上重新消融 |
 
 ---
@@ -75,6 +75,19 @@
 **alpha 消融**：完全无影响。原因：GOP 中位数仅 5，5 选 3 时不同 alpha 选出相同集合。
 
 ### Video-MME 完整评估（100 视频 300 题，max_frames=32）
+
+**kr 消融（Short 视频 36 视频 108 题）**：
+
+| kr | Accuracy | Acc Drop | Avg Gen(ms) | Speedup | Vis Token |
+|----|----------|----------|-------------|---------|----------|
+| baseline | 75.9% | — | 2,189 | 1.0x | 10,737 |
+| 0.9 | 70.4% | -5.5pp | 1,624 | 1.3x | 7,794 |
+| 0.7 | 68.5% | -7.4pp | 1,410 | 1.6x | 6,658 |
+| 0.5 | 69.4% | -6.5pp | 1,103 | **2.0x** | 4,939 |
+| 0.3 | 69.4% | -6.5pp | 783 | **2.8x** | 3,190 |
+| 0.2 | 70.4% | -5.5pp | 589 | **3.7x** | 2,192 |
+
+⚠️ **关键发现：准确率对 kr 不敏感**（68.5%~70.4% 范围内波动），延迟与 visual_tokens 近似线性。这强烈暗示**音频在补偿视觉损失**（"兜底"效应），需去音频消融验证。
 
 **Baseline vs Sparse 完整对比**：
 
@@ -127,7 +140,7 @@
 
 | # | 优先级 | 任务 | 预估时间 | 命令 | 状态 |
 |---|--------|------|---------|------|------|
-| 1 | **P0** | **Short kr 消融** (0.2/0.3/0.5/0.7/0.9) | ~2-3h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --duration short` | 🟡 进行中 |
+| 1 | **P0** | ~~Short kr 消融~~ (0.2/0.3/0.5/0.7/0.9) | ~2-3h | 完成 | ✅ 完成 |
 | 2 | **P0** | **Short 去音频消融** (sparse_no_audio) | ~1h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32 --duration short` | ⏳ 待跑 |
 | 3 | **P1** | **Sparse@64 + Baseline@64 OOM 验证** | ~1h | 验证能力拓展论点 | ⏳ |
 | 4 | **P1** | **论文表格 + Pareto 曲线图** | ~1h | #1/#2 完成后生成 | ⏳ |
@@ -230,7 +243,8 @@
 
 ## 变更日志
 
-- **[2.18 PM]** **死锁修复**：某些视频导致 `qwen_omni_utils` 内部 C 扩展（`torchvision.io.read_video`、`av.open`、`librosa.load→audioread`）永久阻塞，Python SIGALRM 无法打断，导致实验卡死在 23/108、96/108、45/108 等位置。修复：在 `eval_videomme.py` 开头 monkey-patch 三个函数，全部改为 ffmpeg/ffprobe subprocess 调用（带 30-60s 超时）。不影响模型推理/算法/token计算。Jarvis 的临时修复（`use_audio_in_video=False`）已还原，因会破坏 token 拼接逻辑。
+- **[2.18 PM]** **死锁修复（三阶段）**：C 扩展永久阻塞 → ①monkey-patch 改 ffmpeg subprocess ②SIGALRM→SIG_DFL 内核级 watchdog（GIL 被 C 扩展独占时 Python 线程全部阻塞，threading.Timer 无效）③增量 CSV 自动恢复（重启跳过已完成样本）。
+- **[2.18 PM]** kr 消融完成：6 模式 × 108 题全部跑通。核心发现：精度对 kr 不敏感（68.5%~70.4%），kr=0.2 即 3.7x 加速 -5.5pp。
 - **[2.18 PM]** Baseline 完整评估完成：300/300, 62.0%, 0 errors。Short 2x 加速 -5.6pp，M/L 因 max_frames=32 sparse 无效。
 - **[2.18 AM]** Sparse 完整评估完成：300/300, 59.0%, 0 errors。
 - **[2.17]** PROGRESS.md 创建。eval_videomme.py 优化（实时进度 + 超时 + 增量 CSV）。pipeline.py 修复（OOM: max_frames + 音频截断）。
