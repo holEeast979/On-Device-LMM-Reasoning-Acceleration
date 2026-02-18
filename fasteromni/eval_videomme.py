@@ -122,6 +122,152 @@ _ap_mod.process_audio_info = _safe_process_audio_info
 _v25_mod.process_audio_info = _safe_process_audio_info
 if hasattr(_qu_mod, 'process_audio_info'):
     _qu_mod.process_audio_info = _safe_process_audio_info
+
+
+# 3. 替换 fetch_video（根治：用 ffmpeg subprocess 替代 torchvision/decord/av）
+#
+# 死锁点：torchvision.io.read_video() / decord 是 C 扩展，SIGALRM 无法打断。
+# 某些视频导致 C 扩展内部 futex_wait 永久阻塞。
+#
+import json as _json
+import math as _math
+import torch as _torch
+from PIL import Image as _Image
+from qwen_omni_utils.v2_5.vision_process import (
+    smart_nframes, smart_resize, IMAGE_FACTOR,
+    VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS, FRAME_FACTOR,
+)
+
+_VIDEO_TIMEOUT = 60  # seconds
+
+
+def _ffprobe_video_info(path: str, timeout: int = 15) -> dict:
+    """用 ffprobe 获取视频元数据（fps、总帧数、分辨率）。"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate,nb_frames,duration",
+        "-show_entries", "format=duration",
+        "-of", "json", path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}")
+    info = _json.loads(r.stdout)
+    stream = info["streams"][0]
+    width = int(stream["width"])
+    height = int(stream["height"])
+    # Parse fps from r_frame_rate (e.g., "30000/1001")
+    rfr = stream.get("r_frame_rate", "30/1")
+    num, den = rfr.split("/")
+    fps = float(num) / float(den) if float(den) != 0 else 30.0
+    # Total frames: try nb_frames, else compute from duration
+    nb_frames = stream.get("nb_frames", "N/A")
+    if nb_frames != "N/A" and nb_frames != "0":
+        total_frames = int(nb_frames)
+    else:
+        dur = float(stream.get("duration", 0) or info.get("format", {}).get("duration", 0) or 0)
+        total_frames = max(1, int(dur * fps))
+    return {"width": width, "height": height, "fps": fps, "total_frames": total_frames}
+
+
+def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
+                      return_video_sample_fps: bool = False):
+    """
+    安全版 fetch_video：用 ffmpeg subprocess 替代 torchvision/decord。
+
+    单次 ffmpeg 调用 + select 滤镜批量提取所有帧，比逐帧调用快 10x。
+    与原版输出格式完全一致：返回 (video_tensor, sample_fps)
+    其中 video_tensor 是 float32 (T, C, H, W)，已 resize。
+    """
+    if not isinstance(ele.get("video"), str):
+        # 非文件路径（PIL 图片列表等），走原始逻辑
+        from qwen_omni_utils.v2_5.vision_process import fetch_video as _orig_fv
+        return _orig_fv(ele, image_factor=image_factor,
+                        return_video_sample_fps=return_video_sample_fps)
+
+    video_path = ele["video"]
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+
+    # 1. 获取视频信息
+    info = _ffprobe_video_info(video_path)
+    total_frames = info["total_frames"]
+    video_fps = info["fps"]
+    width, height = info["width"], info["height"]
+
+    # 2. 计算需要多少帧
+    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+
+    # 3. 单次 ffmpeg 调用提取所有帧（select 滤镜 + rawvideo pipe）
+    indices = _torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+
+    # 构建 select 滤镜表达式
+    select_expr = "+".join(f"eq(n\\,{idx})" for idx in indices)
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", f"select='{select_expr}'",
+        "-vsync", "vfr",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "pipe:1",
+    ]
+    frame_size = width * height * 3
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=_VIDEO_TIMEOUT)
+        if r.returncode != 0 or len(r.stdout) < frame_size:
+            raise RuntimeError(f"ffmpeg returned {r.returncode}, got {len(r.stdout)} bytes")
+        raw = r.stdout
+        nframes_got = len(raw) // frame_size
+        frames = []
+        for i in range(nframes_got):
+            fb = raw[i * frame_size:(i + 1) * frame_size]
+            frame = np.frombuffer(fb, dtype=np.uint8).reshape(height, width, 3)
+            frames.append(_torch.from_numpy(frame.copy()).permute(2, 0, 1))
+        # 如果帧数不足，用最后一帧填充
+        while len(frames) < nframes:
+            frames.append(frames[-1] if frames else _torch.zeros(3, height, width, dtype=_torch.uint8))
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"ffmpeg video extraction timeout ({_VIDEO_TIMEOUT}s) for {video_path}")
+
+    video = _torch.stack(frames)  # (T, C, H, W)
+
+    # 4. Resize（复用原版逻辑）
+    min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
+    total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
+    max_pixels = max(
+        min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
+        int(min_pixels * 1.05),
+    )
+    if "resized_height" in ele and "resized_width" in ele:
+        resized_height, resized_width = smart_resize(
+            ele["resized_height"], ele["resized_width"], factor=image_factor,
+        )
+    else:
+        resized_height, resized_width = smart_resize(
+            height, width, factor=image_factor,
+            min_pixels=min_pixels, max_pixels=max_pixels,
+        )
+
+    from torchvision.transforms.functional import resize as _tv_resize
+    from torchvision.transforms import InterpolationMode as _IM
+    video = _tv_resize(
+        video, [resized_height, resized_width],
+        interpolation=_IM.BICUBIC, antialias=True,
+    ).float()
+
+    if return_video_sample_fps:
+        return video, sample_fps
+    return video
+
+
+# 注入 fetch_video 到所有引用点
+import qwen_omni_utils.v2_5.vision_process as _vp_mod
+_vp_mod.fetch_video = _safe_fetch_video
+_v25_mod.fetch_video = _safe_fetch_video
+if hasattr(_qu_mod, 'fetch_video'):
+    _qu_mod.fetch_video = _safe_fetch_video
 # === End monkey-patch ===
 
 import argparse
