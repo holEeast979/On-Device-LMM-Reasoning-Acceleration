@@ -143,17 +143,21 @@ class SparseInferencePipeline:
             if max_frames > 0:
                 video_ele["nframes"] = max_frames
             conversation = [{"role": "user", "content": [video_ele, {"type": "text", "text": question}]}]
+            print(f"  [baseline] step1: process_mm_info starting for {os.path.basename(video_path)}", flush=True)
             audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
+            print(f"  [baseline] step1: done ({(time.perf_counter()-t0)*1000:.0f}ms)", flush=True)
             result.preprocess_ms = (time.perf_counter() - t0) * 1000
 
             # 2. Tokenize（音频直接传入 processor，由 processor 生成音频占位 token + 特征）
             t0 = time.perf_counter()
             text = proc.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
             audios_list = list(audios) if audios else None
+            print(f"  [baseline] step2: proc() starting", flush=True)
             inputs = proc(
                 text=text, videos=videos, audio=audios_list,
                 use_audio_in_video=True, return_tensors="pt", padding=True,
             )
+            print(f"  [baseline] step2: proc() done ({(time.perf_counter()-t0)*1000:.0f}ms)", flush=True)
             inputs = inputs.to(model.device)
             result.tokenize_ms = (time.perf_counter() - t0) * 1000
 

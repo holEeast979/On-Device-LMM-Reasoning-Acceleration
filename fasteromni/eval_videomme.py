@@ -437,18 +437,30 @@ class EvalRecord:
 
 
 class _Timeout:
-    """单条推理超时保护（仅 Linux）"""
+    """
+    单条推理超时保护（watchdog 线程版）。
+
+    SIGALRM 无法打断 C 扩展（torchvision/av/librosa 等），
+    改用 threading.Timer + os._exit(1) 作为硬杀手段。
+    os._exit 是直接系统调用，能终止任何状态的进程。
+    配合增量 CSV 写入，已完成的数据不会丢失。
+    """
     def __init__(self, seconds: int = 120):
         self.seconds = seconds
+        self._timer = None
     def __enter__(self):
-        signal.signal(signal.SIGALRM, self._handler)
-        signal.alarm(self.seconds)
+        import threading
+        self._timer = threading.Timer(self.seconds, self._nuke)
+        self._timer.daemon = True
+        self._timer.start()
         return self
     def __exit__(self, *args):
-        signal.alarm(0)
+        if self._timer:
+            self._timer.cancel()
     @staticmethod
-    def _handler(signum, frame):
-        raise TimeoutError("Single inference timed out")
+    def _nuke():
+        print(f"\n[WATCHDOG] Process stuck for too long, force-killing with os._exit(1)", flush=True)
+        os._exit(1)
 
 
 def run_single(
@@ -542,7 +554,17 @@ def run_evaluation(
     max_frames: int = 64,
     incremental_csv: str = "",
 ) -> List[EvalRecord]:
-    """运行一组评估"""
+    """运行一组评估（支持自动恢复：跳过增量 CSV 中已完成的样本）"""
+    # 自动恢复：读取已有增量 CSV，跳过已完成的 question_id
+    completed_qids = set()
+    if incremental_csv and os.path.exists(incremental_csv) and os.path.getsize(incremental_csv) > 0:
+        with open(incremental_csv, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                completed_qids.add(row["question_id"])
+        if completed_qids:
+            print(f"  [resume] Found {len(completed_qids)} completed samples in {os.path.basename(incremental_csv)}, skipping", flush=True)
+
     # 增量 CSV 写入：每条结果实时保存，防止中断丢数据
     csv_writer = None
     csv_file = None
@@ -556,8 +578,12 @@ def run_evaluation(
     correct = 0
     total = 0
     errors = 0
+    skipped = 0
 
     for i, sample in enumerate(samples):
+        if sample.question_id in completed_qids:
+            skipped += 1
+            continue
         rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames)
         records.append(rec)
 
@@ -576,8 +602,10 @@ def run_evaluation(
             status = f"{mark} pred={rec.pred_answer} gt={rec.gt_answer}"
 
         # 每条都输出进度（方便 tmux 实时查看）
+        done = len(records)
+        remaining = len(samples) - skipped
         acc = correct / total * 100 if total > 0 else 0
-        print(f"  [{i+1}/{len(samples)}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
+        print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
               f"| {sample.duration:7s} | {sample.video_file_id[:15]:15s} | {status}", flush=True)
 
     if csv_file:
