@@ -437,6 +437,8 @@ def main():
     parser.add_argument("--keep-ratio", type=float, default=0.5)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="all",
+                        help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
                         choices=["baseline", "sparse", "sparse_no_audio"],
                         help="Modes to evaluate")
@@ -454,6 +456,8 @@ def main():
 
     # 加载样本
     samples = load_videomme_samples(max_videos=args.max_videos)
+    if args.duration != "all":
+        samples = [s for s in samples if s.duration == args.duration]
     n_vids = len(set(s.video_file_id for s in samples))
     dur_counts = defaultdict(int)
     for s in samples:

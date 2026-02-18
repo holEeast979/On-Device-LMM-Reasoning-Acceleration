@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 1 收尾**：Video-MME Sparse 完整评估已跑通（300/300, 0 errors, 59.0%）。待跑 Baseline 对照 + 消融实验。
+**Phase 1 收尾**：Baseline + Sparse 完整评估均已完成（各 300/300, 0 errors）。发现 M/L 视频 max_frames=32 限制使 sparse 无效。Short 视频 2x 加速 -5.6pp 是核心成果。待跑 Short 的 keep_ratio 消融 + 去音频消融。
 
 ---
 
@@ -74,35 +74,37 @@
 
 **alpha 消融**：完全无影响。原因：GOP 中位数仅 5，5 选 3 时不同 alpha 选出相同集合。
 
-### Video-MME 完整评估（100 视频 300 题）
+### Video-MME 完整评估（100 视频 300 题，max_frames=32）
 
-**Sparse 模式 (keep_ratio=0.5, alpha=0.5, max_frames=32)**：
+**Baseline vs Sparse 完整对比**：
 
-| 类别 | 样本数 | 准确率 | 平均 Generate(ms) | 平均 VisTok | 平均 AudTok | 平均 TotalTok |
-|------|--------|--------|------------------|-------------|-------------|---------------|
-| Short | 108 | **69.4%** | 1,092 | 4,939 | 1,893 | 6,911 |
-| Medium | 90 | **57.8%** | 3,189 | 11,052 | 7,420 | 18,557 |
-| Long | 102 | **49.0%** | 3,138 | 10,737 | 7,502 | 18,337 |
-| **Overall** | **300** | **59.0%** | **2,417** | **8,744** | — | — |
+| Duration | N | B Acc | S Acc | Drop | B Gen(ms) | S Gen(ms) | Speedup | Vis Token 减少 |
+|----------|---|-------|-------|------|-----------|-----------|---------|---------------|
+| Short | 108 | 75.0% | 69.4% | **-5.6pp** | 2,177 | 1,092 | **1.99x** | **54.0%** |
+| Medium | 90 | 62.2% | 57.8% | -4.4pp | 3,256 | 3,189 | 1.02x | 0.3% |
+| Long | 102 | 48.0% | 49.0% | +1.0pp | 3,178 | 3,138 | 1.01x | 0.0% |
+| **Overall** | **300** | **62.0%** | **59.0%** | **-3.0pp** | **2,841** | **2,417** | **1.18x** | **19.3%** |
 
-错误数：0（OOM 修复生效：max_frames 上限 + 音频截断到选中 GOP 时间范围）
+两者均 0 errors（OOM 修复生效）。
 
-**与旧 Baseline 对比（Short 视频，唯一公平子集）**：
+⚠️ **关键发现：M/L 视频 sparse 无效**。原因：M/L 视频 GOP 数量多（100+），kr=0.5 选完后 I 帧数仍超 max_frames=32 → 被截断到 32 帧 → 与 baseline 帧数、token 数完全一致。Sparse 只在 Short 视频（GOP 数 5-10）上有效。
 
-| 指标 | Baseline | Sparse | 变化 |
-|------|----------|--------|------|
-| 准确率 | 75.0% | 69.4% | **-5.6pp** |
-| 延迟 | 2,162ms | 1,092ms | **1.98x 加速** |
-| Visual Tokens | 10,737 | 4,939 | **-54%** |
-| 整体准确率 | 62.0% | 59.0% | **-3.0pp** |
+**按 Task Type 对比**：
 
-⚠️ Baseline 详细 CSV 已丢失（被覆盖），Medium/Long 的 baseline 延迟数据缺失，需重跑。
+| Task Type | Baseline | Sparse | Diff | N |
+|-----------|----------|--------|------|---|
+| Spatial Perception | 71.4% | 85.7% | **+14.3pp** | 7 |
+| Object Recognition | 65.1% | 72.1% | **+7.0pp** | 43 |
+| Information Synopsis | 82.4% | 82.4% | 0.0pp | 34 |
+| Action Recognition | 57.6% | 57.6% | 0.0pp | 33 |
+| OCR Problems | 52.6% | 52.6% | 0.0pp | 19 |
+| Temporal Reasoning | 34.6% | 30.8% | -3.8pp | 26 |
+| Action Reasoning | 51.7% | 44.8% | -6.9pp | 29 |
+| Object Reasoning | 66.7% | 58.3% | -8.3pp | 48 |
+| Attribute Perception | 81.5% | 70.4% | **-11.1pp** | 27 |
+| Counting Problem | 41.7% | 29.2% | **-12.5pp** | 24 |
 
-**按 Task Type 分析（Sparse, 弱点）**：
-- Counting Problem: 29.2%（稀疏丢帧对计数影响最大）
-- Temporal Reasoning: 30.8%（时序推理需要连续帧）
-- Information Synopsis: 82.4%（总结类任务对帧完整性要求低）
-- Spatial Reasoning: 100%（但仅 4 样本）
+规律：计数/属性类损失大；总结/空间类不受影响甚至提升。
 
 ---
 
@@ -126,11 +128,12 @@
 | 优先级 | 任务 | 预估时间 | 命令参考 | 状态 |
 |--------|------|---------|---------|------|
 | **P0** | ~~Sparse 完整评估~~ | — | — | ✅ 已完成 (300/300, 59.0%) |
-| **P0** | **Baseline 完整评估** | ~2-3h | `python fasteromni/eval_videomme.py --modes baseline --max-frames 32` | ⏳ 待跑 |
-| **P0** | Baseline vs Sparse 完整对比分析 | ~30min | 手动分析 | ⏳ 等 Baseline |
-| **P0** | keep_ratio 消融 (0.2/0.3/0.5/0.7/0.9) | ~8-10h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32` | ⏳ 待跑 |
-| **P0** | 去音频消融 (sparse vs sparse_no_audio) | ~2-3h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32` | ⏳ 待跑 |
+| **P0** | ~~Baseline 完整评估~~ | — | — | ✅ 已完成 (300/300, 62.0%) |
+| **P0** | ~~Baseline vs Sparse 完整对比分析~~ | — | — | ✅ 已完成（见实验数据） |
+| **P0** | **keep_ratio 消融（仅 Short，36 视频 108 题）** | ~1-2h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --max-videos 36` | ⏳ 待跑 |
+| **P0** | **去音频消融（仅 Short）** | ~1h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32 --max-videos 36` | ⏳ 待跑 |
 | **P1** | 输出论文级表格 + Pareto 曲线图 | ~1h | 消融完成后生成 | ⏳ |
+| **P1** | 测试 sparse@64 + baseline@64 OOM 边界 | ~1h | 验证能力拓展论点 | ⏳ |
 
 ### 中期（Phase 2）
 
@@ -141,6 +144,7 @@
 | 加权均匀采样 | Uniform 策略中引入分数微调，基本等间隔但偏向分数略高的 GOP | 无 |
 | 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
 | alpha 在长视频验证 | 长视频 GOP 数量多（>20），alpha 排序差异能影响选择结果 | Video-MME medium/long 数据 |
+| **M/L 视频 sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。可选：1) 用 kr 直接控制帧数 2) GOP 内选帧 3) max_tokens 替代 max_frames | Phase 1 数据确认问题 |
 
 ### 远期（Phase 3）
 
@@ -162,8 +166,10 @@
 - [ ] **ActivityNet-QA 采样 bug**：按 QA 对采样而非按视频，50 题仅 16 独立视频（已切换到 Video-MME 规避）
 - [ ] **Video-MME "short" 实际 52-111s**：远超预期，baseline 需限帧
 - [x] **Sparse OOM 修复**：max_frames=32 上限 + 音频截断到选中 GOP 时间范围，300/300 全部跑通
-- [ ] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录），但旧 Baseline 详细 CSV 已丢失
-- [ ] **Baseline 完整评估待跑**：需要 Medium/Long 的 baseline 延迟数据来计算加速比
+- [x] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录）
+- [x] **Baseline 完整评估**：300/300, 62.0%, 0 errors
+- [ ] **M/L 视频 sparse 无效**：max_frames=32 限制使 sparse 在 M/L 上帧数、token 数与 baseline 完全一致。需要改进帧选择策略或提高 max_frames
+- [ ] **Short 视频逐视频波动大**：部分视频准确率暴跌 66pp（关键帧丢失），部分提升 33pp（去噪效果）
 
 ---
 
@@ -205,7 +211,8 @@
 
 ## 变更日志
 
-- **[2.18]** Video-MME Sparse 完整评估完成：300/300, 59.0%, 0 errors。与旧 Baseline 对比：Short 加速 1.98x (-5.6pp)，整体 -3.0pp。发现 Counting/Temporal Reasoning 是弱点。修复 eval 脚本：每个 mode 独立保存到子目录（baseline/, sparse/），防止互相覆盖。Sparse 数据已备份。OOM 修复验证有效（max_frames + 音频截断）。
+- **[2.18 PM]** Baseline 完整评估完成：300/300, 62.0%, 0 errors。深度对比分析：Short 2x 加速 -5.6pp（核心成果），M/L 因 max_frames=32 限制 sparse 无效（帧数和 token 完全一致）。按 Task Type 分析：Counting -12.5pp（最差），Information Synopsis 0pp（最稳）。发现根因：M/L 视频 GOP 数量多（100+），kr 选完后 I 帧仍超 max_frames → 被截断 → 与 baseline 一样。官方 Qwen 用 FPS+pixel budget 在多卡 80GB 上不受此限制。
+- **[2.18 AM]** Video-MME Sparse 完整评估完成：300/300, 59.0%, 0 errors。与旧 Baseline 对比：Short 加速 1.98x (-5.6pp)，整体 -3.0pp。发现 Counting/Temporal Reasoning 是弱点。修复 eval 脚本：每个 mode 独立保存到子目录（baseline/, sparse/），防止互相覆盖。Sparse 数据已备份。OOM 修复验证有效（max_frames + 音频截断）。
 - **[2.17]** PROGRESS.md 创建 + Git push (17 文件 3346 行)。eval_videomme.py 优化：每条实时进度 + 120s 超时保护 + 增量 CSV 写入。pipeline.py 修复：max_frames 上限 + 音频截断到选中 GOP 时间范围（解决 medium/long OOM）。Windsurf Rules 配置。中期待办增加：选择策略软切换、加权均匀采样。
 - **[2.16]** Video-MME 评估 Pipeline 完成 (`eval_videomme.py`)，smoke test 3 视频 9 题通过。Baseline OOM 问题修复 (max_frames=32)。Pipeline 增加 `skip_audio` 参数支持去音频消融。
 - **[2.16]** GPT Code Review 8 个问题修了 6 个。NLTK 评估器升级完成。ActivityNet-QA 消融完成（发现 alpha 无影响、音频兜底效应）。
