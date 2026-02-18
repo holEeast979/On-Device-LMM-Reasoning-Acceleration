@@ -239,7 +239,7 @@
 - [ ] **论文故事线**：选"音视频联合稀疏化框架"还是"GOP 感知推理加速"？前者差异化更强但需要证明音频的参与确实有用。
 - [ ] **content-adaptive sparsification**：根据视频类型（风景/运动/对话）动态调整 kr 和 alpha，这是 Phase 2 还是论文核心贡献？
 - [x] **Video-MME vs ActivityNet-QA**：长视频（medium/long）对稀疏化的压力是否会暴露短视频掩盖的问题？→ 已讨论，见外部反馈 [2.18]
-- [ ] **Prefill 中 53% "Other" 开销**：之前 token-scaling 实验发现 ViT 17% + Audio 13% + LLM 17% + Other 53%。这个 Other 能否进一步分解？
+- [x] **Prefill 中 53% "Other" 开销**：之前 token-scaling 实验发现 ViT 17% + Audio 13% + LLM 17% + Other 53%。这个 Other 能否进一步分解？→ 已定性为固定开销，见外部反馈 [2.18]
 
 ---
 
