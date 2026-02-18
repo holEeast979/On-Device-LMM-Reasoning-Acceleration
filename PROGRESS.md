@@ -121,40 +121,45 @@
 
 ---
 
-## 待办事项
+## 待办事项（按优先级排序）
 
-### 紧急（Phase 1 收尾）
+### Phase 1 收尾（串行执行，共 ~5h）
 
-| 优先级 | 任务 | 预估时间 | 命令参考 | 状态 |
-|--------|------|---------|---------|------|
-| **P0** | ~~Sparse 完整评估~~ | — | — | ✅ 已完成 (300/300, 59.0%) |
-| **P0** | ~~Baseline 完整评估~~ | — | — | ✅ 已完成 (300/300, 62.0%) |
-| **P0** | ~~Baseline vs Sparse 完整对比分析~~ | — | — | ✅ 已完成（见实验数据） |
-| **P0** | **keep_ratio 消融（仅 Short，36 视频 108 题）** | ~1-2h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --max-videos 36` | ⏳ 待跑 |
-| **P0** | **去音频消融（仅 Short）** | ~1h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32 --max-videos 36` | ⏳ 待跑 |
-| **P1** | 输出论文级表格 + Pareto 曲线图 | ~1h | 消融完成后生成 | ⏳ |
-| **P1** | 测试 sparse@64 + baseline@64 OOM 边界 | ~1h | 验证能力拓展论点 | ⏳ |
+| # | 优先级 | 任务 | 预估时间 | 命令 | 状态 |
+|---|--------|------|---------|------|------|
+| 1 | **P0** | **Short kr 消融** (0.2/0.3/0.5/0.7/0.9) | ~2-3h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --duration short` | ⏳ 待跑 |
+| 2 | **P0** | **Short 去音频消融** (sparse_no_audio) | ~1h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32 --duration short` | ⏳ 待跑 |
+| 3 | **P1** | **Sparse@64 + Baseline@64 OOM 验证** | ~1h | 验证能力拓展论点 | ⏳ |
+| 4 | **P1** | **论文表格 + Pareto 曲线图** | ~1h | #1/#2 完成后生成 | ⏳ |
 
-### 中期（Phase 2）
+> ⚠️ #1 和 #2 串行执行（跑完一个再跑下一个），同一时间只占一个 GPU，不会显存不足。
 
-| 任务 | 说明 | 依赖 |
-|------|------|------|
-| P/B 帧选择策略 | 在 GOP 内选关键帧，解决"只取 I 帧太粗"的问题 | Phase 1 数据确认稀疏化有效 |
-| 选择策略软切换 | 方差在 [0.01, 0.05] 区间时按比例混合 TopK 和 Uniform，替代当前硬阈值 | 无 |
-| 加权均匀采样 | Uniform 策略中引入分数微调，基本等间隔但偏向分数略高的 GOP | 无 |
-| 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
-| alpha 在长视频验证 | 长视频 GOP 数量多（>20），alpha 排序差异能影响选择结果 | Video-MME medium/long 数据 |
-| **M/L 视频 sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。可选：1) 用 kr 直接控制帧数 2) GOP 内选帧 3) max_tokens 替代 max_frames | Phase 1 数据确认问题 |
+#### 已完成
 
-### 远期（Phase 3）
-
-| 任务 | 说明 |
+| 任务 | 结果 |
 |------|------|
-| 多 benchmark 交叉验证 | Video-MME + ActivityNet-QA (GPT-judge) |
-| 与 naive 方法对比 | uniform frame sampling / random sampling vs AV-LRM |
-| Ring Buffer CPU/GPU 异步预取 | 批量场景隐藏预处理延迟 |
-| Patch 级稀疏化 | 帧内部哪些区域重要 |
-| 长视频能力验证 | sparse 模式处理 baseline OOM 的长视频 |
+| ~~Sparse 完整评估~~ | ✅ 300/300, 59.0%, 0 errors |
+| ~~Baseline 完整评估~~ | ✅ 300/300, 62.0%, 0 errors |
+| ~~Baseline vs Sparse 深度对比~~ | ✅ Short 2x加速-5.6pp; M/L 因 max_frames=32 无效 |
+
+### Phase 2（M/L 视频 + 策略改进）
+
+| # | 任务 | 说明 | 依赖 |
+|---|------|------|------|
+| 5 | **M/L sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。方案：1) kr 直接控制帧数 2) GOP 内选帧 3) max_tokens 替代 max_frames | Phase 1 数据 |
+| 6 | 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
+| 7 | P/B 帧选择策略 | GOP 内选关键帧，解决"只取 I 帧太粗" | Phase 1 |
+| 8 | 选择策略软切换 | 方差区间混合 TopK 和 Uniform | 无 |
+| 9 | alpha 在长视频验证 | 长视频 GOP 多（>20），alpha 差异能影响选择 | M/L 数据 |
+
+### Phase 3（扩展 + 对比）
+
+| # | 任务 | 说明 |
+|---|------|------|
+| 10 | Ring Buffer CPU/GPU 异步预取 | 批量场景隐藏预处理延迟 |
+| 11 | 与 naive 方法对比 | uniform / random sampling vs AV-LRM |
+| 12 | 多 benchmark 交叉验证 | Video-MME + ActivityNet-QA |
+| 13 | Patch 级稀疏化 | 帧内部哪些区域重要 |
 
 ---
 
