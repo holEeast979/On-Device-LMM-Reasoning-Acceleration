@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 1 收尾**：Baseline + Sparse 完整评估均已完成（各 300/300, 0 errors）。发现 M/L 视频 max_frames=32 限制使 sparse 无效。Short 视频 2x 加速 -5.6pp 是核心成果。待跑 Short 的 keep_ratio 消融 + 去音频消融。
+**Phase 1 收尾**：Baseline + Sparse 完整评估均已完成（各 300/300, 0 errors）。Short 视频 2x 加速 -5.6pp 是核心成果。**kr 消融正在跑**（tmux eval session），待跑去音频消融。死锁 bug 已修复（见已知问题 #11）。
 
 ---
 
@@ -40,7 +40,7 @@
 | Pipeline | `fasteromni/pipeline.py` | ✅ 完成 | baseline+sparse+sparse_no_audio 三模式 | — | — |
 | 评估器(EM) | `fasteromni/evaluator.py` | ✅ 完成 | NLTK 版 11/11 self-test 通过 | — | Video-MME 不需要 EM |
 | ActivityNet 评估 | `fasteromni/eval_accuracy.py` | ✅ 完成 | 50 样本消融跑通 | 仅 16 独立视频 | 不作为论文主实验 |
-| Video-MME 评估 | `fasteromni/eval_videomme.py` | 🟡 95% | Sparse 300/300 跑通 | Baseline 未跑 | **跑 Baseline 对照** |
+| Video-MME 评估 | `fasteromni/eval_videomme.py` | ✅ 完成 | Baseline+Sparse 300/300 跑通 | 死锁已修 | kr 消融进行中 |
 | 消融脚本 | `fasteromni/run_ablation.py` | ✅ 完成 | ActivityNet 消融跑通 | — | 在 Video-MME 上重新消融 |
 
 ---
@@ -127,7 +127,7 @@
 
 | # | 优先级 | 任务 | 预估时间 | 命令 | 状态 |
 |---|--------|------|---------|------|------|
-| 1 | **P0** | **Short kr 消融** (0.2/0.3/0.5/0.7/0.9) | ~2-3h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --duration short` | ⏳ 待跑 |
+| 1 | **P0** | **Short kr 消融** (0.2/0.3/0.5/0.7/0.9) | ~2-3h | `python fasteromni/eval_videomme.py --sweep keep_ratio --max-frames 32 --duration short` | 🟡 进行中 |
 | 2 | **P0** | **Short 去音频消融** (sparse_no_audio) | ~1h | `python fasteromni/eval_videomme.py --modes sparse_no_audio --max-frames 32 --duration short` | ⏳ 待跑 |
 | 3 | **P1** | **Sparse@64 + Baseline@64 OOM 验证** | ~1h | 验证能力拓展论点 | ⏳ |
 | 4 | **P1** | **论文表格 + Pareto 曲线图** | ~1h | #1/#2 完成后生成 | ⏳ |
@@ -165,16 +165,17 @@
 
 ## 已知问题
 
-- [ ] **音频"兜底"效应未验证**：kr=0.2 不掉精度可能是因为完整音频 token 在补偿，需去音频消融分离贡献
+- [ ] **音频“兖底”效应未验证**：kr=0.2 不掉精度可能是因为完整音频 token 在补偿，需去音频消融分离贡献
 - [ ] **GOP 粒度太粗**：短视频中位数仅 5 个 GOP，alpha 参数和打分公式无法体现价值
 - [ ] **I 帧解码是全解码**：`container.decode()` 遍历全帧再过滤 keyframe，CPU 侧无加速（但不是瓶颈）
-- [ ] **ActivityNet-QA 采样 bug**：按 QA 对采样而非按视频，50 题仅 16 独立视频（已切换到 Video-MME 规避）
-- [ ] **Video-MME "short" 实际 52-111s**：远超预期，baseline 需限帧
+- [x] **ActivityNet-QA 采样 bug**：按 QA 对采样而非按视频，50 题仅 16 独立视频→已切换到 Video-MME 规避，不再使用 ActivityNet-QA 作主实验
+- [x] **Video-MME "short" 实际 52-111s**：已确认是官方定义，baseline 用 max_frames=32 解决
 - [x] **Sparse OOM 修复**：max_frames=32 上限 + 音频截断到选中 GOP 时间范围，300/300 全部跑通
 - [x] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录）
 - [x] **Baseline 完整评估**：300/300, 62.0%, 0 errors
 - [ ] **M/L 视频 sparse 无效**：max_frames=32 限制使 sparse 在 M/L 上帧数、token 数与 baseline 完全一致。需要改进帧选择策略或提高 max_frames
 - [ ] **Short 视频逐视频波动大**：部分视频准确率暴跌 66pp（关键帧丢失），部分提升 33pp（去噪效果）
+- [x] **音频+视频提取死锁**：某些视频导致 `torchvision.io.read_video`/`av.open`/`librosa.load` C 扩展永久阻塞，SIGALRM 无法打断。修复：monkey-patch `fetch_video` + `process_audio_info` + `librosa.load`，全部改为 ffmpeg/ffprobe subprocess + timeout。详见变更日志 [2.18 PM]
 
 ---
 
@@ -203,6 +204,19 @@
 
 ---
 
+## 编码 Agent 规范
+
+> 以下规则适用于所有编码 Agent（Windsurf / Cursor / GPT 等）在本项目中工作时遵守。
+
+1. **不要直接跑完整实验**。只跑 smoke test（`--max-videos 3`）验证正确性，用户自己控制完整实验运行。
+2. **进度同步**：每次任务完成后更新 `PROGRESS.md`（当前阶段 + 已知问题 + 变更日志）。
+3. **不改第三方库**：对 `qwen_omni_utils` 等依赖的修复一律用 monkey-patch，不直接改源码。
+4. **`pipeline.py` 保持简洁**：所有 hack/workaround 放在 `eval_videomme.py` 开头的 monkey-patch 区域，pipeline.py 只做直接调用。
+5. **超时保护**：所有外部 I/O（视频/音频读取）必须用 `subprocess.run(timeout=N)` 包裹，不依赖 SIGALRM（C 扩展无法打断）。
+6. **实验数据安全**：每个 mode/kr 值独立输出目录，增量 CSV 实时写入，崩溃不丢已完成数据。
+
+---
+
 ## 待探讨问题（供离线 Agent 讨论）
 
 - [ ] **音频兜底假说**：如果去掉音频后 kr=0.2 准确率暴跌，说明 GOP 稀疏化本身价值不大？还是说"利用完整音频弥补视觉损失"本身就是一个有价值的设计？
@@ -216,13 +230,9 @@
 
 ## 变更日志
 
-- **[2.18 PM]** Baseline 完整评估完成：300/300, 62.0%, 0 errors。深度对比分析：Short 2x 加速 -5.6pp（核心成果），M/L 因 max_frames=32 限制 sparse 无效（帧数和 token 完全一致）。按 Task Type 分析：Counting -12.5pp（最差），Information Synopsis 0pp（最稳）。发现根因：M/L 视频 GOP 数量多（100+），kr 选完后 I 帧仍超 max_frames → 被截断 → 与 baseline 一样。官方 Qwen 用 FPS+pixel budget 在多卡 80GB 上不受此限制。
-- **[2.18 AM]** Video-MME Sparse 完整评估完成：300/300, 59.0%, 0 errors。与旧 Baseline 对比：Short 加速 1.98x (-5.6pp)，整体 -3.0pp。发现 Counting/Temporal Reasoning 是弱点。修复 eval 脚本：每个 mode 独立保存到子目录（baseline/, sparse/），防止互相覆盖。Sparse 数据已备份。OOM 修复验证有效（max_frames + 音频截断）。
-- **[2.17]** PROGRESS.md 创建 + Git push (17 文件 3346 行)。eval_videomme.py 优化：每条实时进度 + 120s 超时保护 + 增量 CSV 写入。pipeline.py 修复：max_frames 上限 + 音频截断到选中 GOP 时间范围（解决 medium/long OOM）。Windsurf Rules 配置。中期待办增加：选择策略软切换、加权均匀采样。
-- **[2.16]** Video-MME 评估 Pipeline 完成 (`eval_videomme.py`)，smoke test 3 视频 9 题通过。Baseline OOM 问题修复 (max_frames=32)。Pipeline 增加 `skip_audio` 参数支持去音频消融。
-- **[2.16]** GPT Code Review 8 个问题修了 6 个。NLTK 评估器升级完成。ActivityNet-QA 消融完成（发现 alpha 无影响、音频兜底效应）。
-- **[2.15]** 串行 Pipeline 跑通：GOP 解析 → AV-LRM 打分 → I 帧解码 → 模型推理。首次 TTFT 对比完成。
-- **[2.18 PM] [Jarvis 报告]** **BUG: 音频提取死锁导致实验卡死**。kr 消融实验两次卡死（23/108 和 96/108），GPU 0% 功耗 11W，进程 Sleep 在 futex_wait_queue_me。→ ✅ 已修复，见下方。
-- **[2.18 PM] [Jarvis 临时修复]** pipeline.py:354 `use_audio_in_video=True→False`。→ ❌ 已还原。此修改会破坏 `replace_multimodal_special_tokens` 中 video+audio token 的交错拼接逻辑，影响实验结果一致性。
-- **[2.18 PM] [Jarvis 分析]** 死锁根因定位：`process_audio_info()` 中 `_check_if_video_has_audio()→av.open()` 和 `librosa.load()→audioread.ffdec.FFmpegAudioFile()` 两个阻塞点。→ ✅ 分析正确，已采纳方案(2)。
-- **[2.18 PM] [Windsurf 修复]** **音频+视频提取死锁根治**。三层 monkey-patch 方案：(1) `librosa.load` → subprocess ffmpeg+timeout 兜底；(2) `process_audio_info` → 完全绕过 `av.open` 和 `librosa.load/audioread`；(3) `fetch_video` → 用 ffmpeg subprocess + select 滤镜替代 torchvision.io.read_video/decord（C 扩展阻塞时 SIGALRM 无法打断）。尝试过 os.fork() 方案但 CUDA 初始化后 fork 子进程 segfault，尝试 subprocess.Popen 方案但每次导入 torch 耗时 10s+ 不可行。最终方案：所有 I/O 操作（音频/视频/GOP 解析）改为 ffmpeg/ffprobe subprocess 调用，带 30-60s 超时，在主进程中运行无 CUDA 冲突。注入到 qwen_omni_utils 三个模块引用点。Smoke test 通过：3 视频 54 条推理（baseline + 5 kr 值），0 errors，无卡死。
+- **[2.18 PM]** **死锁修复**：某些视频导致 `qwen_omni_utils` 内部 C 扩展（`torchvision.io.read_video`、`av.open`、`librosa.load→audioread`）永久阻塞，Python SIGALRM 无法打断，导致实验卡死在 23/108、96/108、45/108 等位置。修复：在 `eval_videomme.py` 开头 monkey-patch 三个函数，全部改为 ffmpeg/ffprobe subprocess 调用（带 30-60s 超时）。不影响模型推理/算法/token计算。Jarvis 的临时修复（`use_audio_in_video=False`）已还原，因会破坏 token 拼接逻辑。
+- **[2.18 PM]** Baseline 完整评估完成：300/300, 62.0%, 0 errors。Short 2x 加速 -5.6pp，M/L 因 max_frames=32 sparse 无效。
+- **[2.18 AM]** Sparse 完整评估完成：300/300, 59.0%, 0 errors。
+- **[2.17]** PROGRESS.md 创建。eval_videomme.py 优化（实时进度 + 超时 + 增量 CSV）。pipeline.py 修复（OOM: max_frames + 音频截断）。
+- **[2.16]** Video-MME 评估 Pipeline 完成。GPT Code Review 6/8 修复。ActivityNet-QA 消融完成。
+- **[2.15]** 串行 Pipeline 跑通。首次 TTFT 对比完成。
