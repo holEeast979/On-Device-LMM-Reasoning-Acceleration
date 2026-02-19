@@ -355,7 +355,7 @@ class SparseInferencePipeline:
             text = proc.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
             inputs = proc(
                 text=text, videos=[video_tensor], audio=audio_arg,
-                use_audio_in_video=True, return_tensors="pt", padding=True,
+                use_audio_in_video=(not skip_audio), return_tensors="pt", padding=True,
             )
             inputs = inputs.to(model.device)
             result.tokenize_ms = (time.perf_counter() - t0) * 1000
@@ -396,7 +396,7 @@ class SparseInferencePipeline:
             result.error = "OOM"
             self._clear_gpu()
         except Exception as e:
-            result.error = str(e)
+            result.error = repr(e) if not str(e) else str(e)
             import traceback
             traceback.print_exc()
 

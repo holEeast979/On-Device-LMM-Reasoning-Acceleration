@@ -556,7 +556,9 @@ def run_evaluation(
         with open(incremental_csv, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                completed_qids.add(row["question_id"])
+                # 只认有效记录（有预测结果且有生成时间），忽略垃圾数据
+                if row.get("pred_answer", "").strip() and float(row.get("generate_ms", 0)) > 0:
+                    completed_qids.add(row["question_id"])
         if completed_qids:
             print(f"  [resume] Found {len(completed_qids)} completed samples in {os.path.basename(incremental_csv)}, skipping", flush=True)
 
