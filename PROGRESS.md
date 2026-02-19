@@ -158,17 +158,21 @@
 | 死锁修复 + 自动恢复 | ✅ SIG_DFL 内核级 watchdog + 增量 CSV |
 | GPT Review Prompt | ✅ `gpt_review_prompt.md` 已就绪 |
 
-### Phase 2（稀疏化策略进化 — 依赖 GPT Review 结果调整优先级）
+### Phase 2（GPT Review 驱动 — 补充实验 + 策略改进）
 
-| # | 优先级 | 任务 | 说明 | 依赖 |
-|---|--------|------|------|------|
-| 1 | **P0** | **M/L sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。方案：kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | GPT Review |
-| 2 | **P0** | **Content-adaptive sparsification** | 根据视频内容动态调整 kr（解决逐视频波动大的 tail case） | #1 |
-| 3 | **P1** | **Naive baseline 对比** | uniform/random 采帧 vs AV-LRM → 证明打分公式价值（GPT 大概率会问） | 无 |
-| 4 | **P1** | P/B 帧选择策略 | GOP 内选关键帧，解决"只取 I 帧太粗" | #1 |
-| 5 | **P1** | Sparse@64 + Baseline@64 OOM 验证 | 验证稀疏化扩展能力边界（但非独特贡献，所有稀疏化方法均可） | 无 |
-| 6 | **P2** | alpha 在长视频验证 | 长视频 GOP 多（>20），alpha 差异能影响选择 | M/L 数据 |
-| 7 | **P2** | 论文表格 + Pareto 曲线图 | 待论文故事线和补充实验确定后生成 | #1-#3 |
+> ⚠️ 优先级按 GPT Review 严重程度排列。P0 是"不做论文站不住"，P1 是"做了论文更强"。
+
+| # | 优先级 | 任务 | GPT Review 级别 | 说明 | 预估 |
+|---|--------|------|-----------------|------|------|
+| 1 | **P0** | **Naive baselines 对比** | Critical #1 | 等间隔/随机/只取I帧不打分，同帧数对比 → 证明 AV-LRM 优于 naive | ~2h |
+| 2 | **P0** | **Modality baselines** | Major #2 | text-only / audio-only / video-only 下界 → 确认模型吃了多少视觉信息 | ~2h |
+| 3 | **P0** | **Sparse@64 vs Baseline@64** | Critical #3 | 验证稀疏化扩展能力边界，打穿"只对短视频有效" | ~30min |
+| 4 | **P0** | **音频公平性修复** | Critical #2 | baseline 也做音频截断，或明确报告音频 token 差异（实测仅 7.9%） | ~1h |
+| 5 | **P1** | **Per-video 统计** | Major #1 | 按视频为单位报告均值/方差/置信区间 + 配对检验 | ~1h |
+| 6 | **P1** | **M/L sparse 策略重设计** | — | kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | ~3h |
+| 7 | **P1** | **Content-adaptive** | — | 动态 kr（解决逐视频波动大的 tail case） | ~2h |
+| 8 | **P2** | AV-LRM 在高 GOP 场景验证 | Major #4 | 在 M/L（GOP 100+）证明打分公式优于 naive | 依赖 #6 |
+| 9 | **P2** | 论文表格 + Pareto 曲线图 | — | 全部补充实验完成后生成 | ~1h |
 
 ### Phase 3（架构扩展 — 其他两大技术支柱）
 
@@ -223,6 +227,12 @@
 - **[2.18] Jarvis 讨论 - GOP 粒度上限**：短视频 GOP 中位数仅 5，alpha 和打分公式无区分度，这是 H.264 编码特性决定的已知限制。但不影响主线贡献：加速收益来自"砍掉多少 token"而非"选哪几个 GOP"，精度对 kr 不敏感也印证了这一点。GOP 级筛选对长视频（GOP 100+）有足够选择空间，打分公式和 alpha 预期有效。短视频暴露的粒度不足问题引出 Phase 2 方向：帧级选择（GOP 内选 P/B 帧），在更细粒度上优化短视频筛选。
 - **[2.18] Jarvis 讨论 - M/L 视频 sparse 失效分析**：由于硬件显存约束（32GB），M/L 视频必须加 max_frames=32 限制，导致 sparse 选完 GOP 后 I 帧数仍超上限被截断，与 baseline 完全一致。但反过来看，这恰好是 sparse 的价值所在：结合稀疏化可以提高 max_frames 上限（如 64 甚至更高）而不 OOM，从而让端侧设备支持更长视频。这是"稀疏化扩展能力边界"的贡献点，待 P1 #3（Sparse@64 + Baseline@64 OOM 验证）实验确认。
 - **[2.18] Jarvis 讨论 - Prefill 53% "Other" 开销已定性**：回溯 1 月初 10 视频 TTFT 分解实验（1.6 日后进展汇总），确认 Others 是**固定开销（Fixed Overhead）**，$R^2=0.04$，与 token 数量无相关性。具体来源：①PyTorch/HF 框架调度开销（generate 调用链、模型初始化）②CUDA context + kernel launch ③内存分配器预热 + KV cache 初始化 ④CPU-GPU 同步等待（Wall-clock 计时包含）⑤Python GIL 开销。vLLM 对比实验已验证可压缩此部分。注意：换了 Qwen2.5-Omni + FasterOmni pipeline 后 53% 这个具体数字可能变化，但"固定开销"的定性结论不变。此问题可从待探讨列表划掉。
+- **[2.19] GPT-5.2 Phase 1 Review**：质量很高，发现多个致命问题。分级如下：
+  - **Critical**：①**新颖性/归因风险** — kr 不敏感可能意味着"选哪几帧不重要"，必须补 naive baselines（等间隔/随机/只取 I 帧不打分等）否则 AV-LRM 贡献点站不住 ②**公平性混淆** — sparse 截断音频到选中 GOP 时间跨度，baseline 用全音频，speedup 混入了"音频 token 减少"效应（实测仅 7.9%，但需明确说明）③**适用范围** — M/L 无效是结构性问题，必须做 Sparse@64 vs Baseline@64 打穿
+  - **Major**：①**统计方法** — 108 题来自 36 视频（每视频 3 题），题级不独立，需按视频为单位报告+配对检验 ②**kr 不敏感解释** — 可能是 benchmark bias（语言先验强），需补 text-only/audio-only/video-only 下界确认模型吃了多少视觉信息 ③**Counting 暴跌** — TopK + uniform coverage（固定首尾 + K-2 按分数选）④**AV-LRM 有效性** — 写清楚是可选插件，或在高 GOP 场景证明优于 naive ⑤**CPU 解码口径** — 论文别说"只解码 I 帧快"，最多说"可优化"
+  - **Minor**：①gop_parser.py 实际用 PyAV 不是 ffprobe，表述不一致 ②gop_parser/audio_energy 仍有 av.open 无超时 ③decode_i_frames_seek 可能取错 keyframe
+  - **Positive**：①增量 CSV+resume+内核级超时是 paper-level 工程 ②关键口径已修正结论可信 ③负面点提前暴露 Phase 2 有抓手
+  - **GPT 建议最小代价方案**：补 3 个对照（text-only / audio-only / naive-uniform 同帧数）+ 1 个关键实验（Baseline@64 vs Sparse@64）
 
 ---
 
@@ -267,6 +277,7 @@
 
 ## 变更日志
 
+- **[2.19]** GPT-5.2 Phase 1 Review 完成，发现 3 Critical + 5 Major 问题。Phase 2 优先级据此重排。
 - **[2.19]** Phase 1 收尾：更新三大技术支柱架构、Phase 2 方向、GPT Review 规范、相关工作跟踪区域。
 - **[2.19]** 去音频消融完成：108/108，67.6%。音频仅恢复 1.8pp，视觉稀疏本身鲁棒。修复 sparse_no_audio 模式 bug（use_audio_in_video=False）+ resume 逻辑加固（忽略无效记录）。
 - **[2.18 PM]** **死锁修复（三阶段）**：C 扩展永久阻塞 → ①monkey-patch 改 ffmpeg subprocess ②SIGALRM→SIG_DFL 内核级 watchdog（GIL 被 C 扩展独占时 Python 线程全部阻塞，threading.Timer 无效）③增量 CSV 自动恢复（重启跳过已完成样本）。
