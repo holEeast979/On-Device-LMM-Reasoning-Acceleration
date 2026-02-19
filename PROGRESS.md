@@ -8,24 +8,24 @@
 
 ## 当前阶段
 
-**Phase 1 完成**：Baseline + Sparse + kr 消融 + 去音频消融全部完成。核心发现：①精度对 kr 不敏感（kr=0.2~0.9 准确率 68.5%~70.4%）②音频兜底效应很小（仅 1.8pp），视觉稀疏化本身就很稳定。待做：Sparse@64 OOM 验证（#3）+ 论文图表（#4）。
+**Phase 1 完成，等待 GPT Review 后进入 Phase 2**。核心发现：①精度对 kr 不敏感（kr=0.2~0.9 准确率 68.5%~70.4%）②音频兜底效应很小（仅 1.8pp），视觉稀疏化本身鲁棒。GPT Review Prompt 已就绪（`gpt_review_prompt.md`），Review 结果将决定 Phase 2 优先级。
 
 ---
 
 ## 项目背景
 
-研究 **Qwen2.5-Omni-7B** 多模态大模型的推理加速，核心方法是 **GOP 级视频 token 稀疏化（AV-LRM）**。
+研究 **Qwen2.5-Omni-7B** 多模态大模型的推理加速，构建**端侧多模态推理加速架构**。
 
-三个独立可解耦的技术点：
-1. **GOP 级 token 稀疏化**（AV-LRM 打分 + Top-K/Uniform 选择）← 当前主线
-2. **显存管理优化**（ViT 后清理激活值 + 分块 Encoding）
-3. **Ring Buffer**（CPU/GPU 异步预取，批量场景隐藏预处理延迟）
+三大技术支柱（独立可解耦）：
+1. **GOP 级 token 稀疏化**（AV-LRM 打分 + Top-K/Uniform 选择）← Phase 1 已完成初步验证
+2. **显存碎片优化**（ViT 后清理激活值 + 分块 Encoding）← Phase 2/3
+3. **Ring Buffer 流水线**（CPU/GPU 异步预取，批量场景隐藏预处理延迟）← Phase 3
 
 **硬件**：32GB 显存，OOM 边界 ~25-30k tokens（约 34s 视频全量帧）。
 
-**论文故事线候选**：
-- "首个面向端侧的音视频联合稀疏化框架"（差异化最强）
-- "基于 GOP 感知的多模态推理加速"
+**论文故事线**（去音频消融后确认）：
+- **主线**："GOP 感知推理加速" — 视觉稀疏化本身鲁棒，kr 不敏感
+- **加分项**：音频保留作为 free lunch（零成本恢复 1.8pp）
 
 ---
 
@@ -146,56 +146,51 @@
 
 ## 待办事项（按优先级排序）
 
-### Phase 1 收尾（串行执行，共 ~5h）
-
-| # | 优先级 | 任务 | 预估时间 | 命令 | 状态 |
-|---|--------|------|---------|------|------|
-| 1 | **P0** | ~~Short kr 消融~~ (0.2/0.3/0.5/0.7/0.9) | ~2-3h | 完成 | ✅ 完成 |
-| 2 | **P0** | ~~Short 去音频消融~~ (sparse_no_audio) | ~30min | 完成 | ✅ 完成 |
-| 3 | **P1** | **Sparse@64 + Baseline@64 OOM 验证** | ~1h | 验证能力拓展论点 | ⏳ |
-| 4 | **P1** | **论文表格 + Pareto 曲线图** | ~1h | #1/#2 完成后生成 | ⏳ |
-
-> ⚠️ #1 和 #2 串行执行（跑完一个再跑下一个），同一时间只占一个 GPU，不会显存不足。
-
-#### 已完成
+### Phase 1 ✅ 已完成
 
 | 任务 | 结果 |
 |------|------|
-| ~~Sparse 完整评估~~ | ✅ 300/300, 59.0%, 0 errors |
-| ~~Baseline 完整评估~~ | ✅ 300/300, 62.0%, 0 errors |
-| ~~Baseline vs Sparse 深度对比~~ | ✅ Short 2x加速-5.6pp; M/L 因 max_frames=32 无效 |
+| Baseline 完整评估 | ✅ 300/300, 62.0%, 0 errors |
+| Sparse 完整评估 | ✅ 300/300, 59.0%, 0 errors |
+| Baseline vs Sparse 深度对比 | ✅ Short 2x加速 -5.6pp; M/L 因 max_frames=32 无效 |
+| Short kr 消融 (6组×108) | ✅ 精度对 kr 不敏感 (68.5%~70.4%)，kr=0.2 即 3.7x 加速 |
+| Short 去音频消融 | ✅ 108/108, 67.6%，音频仅恢复 1.8pp |
+| 死锁修复 + 自动恢复 | ✅ SIG_DFL 内核级 watchdog + 增量 CSV |
+| GPT Review Prompt | ✅ `gpt_review_prompt.md` 已就绪 |
 
-### Phase 2（M/L 视频 + 策略改进）
+### Phase 2（稀疏化策略进化 — 依赖 GPT Review 结果调整优先级）
 
-| # | 任务 | 说明 | 依赖 |
-|---|------|------|------|
-| 5 | **M/L sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。方案：1) kr 直接控制帧数 2) GOP 内选帧 3) max_tokens 替代 max_frames | Phase 1 数据 |
-| 6 | 显存管理优化 | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 | 无 |
-| 7 | P/B 帧选择策略 | GOP 内选关键帧，解决"只取 I 帧太粗" | Phase 1 |
-| 8 | 选择策略软切换 | 方差区间混合 TopK 和 Uniform | 无 |
-| 9 | alpha 在长视频验证 | 长视频 GOP 多（>20），alpha 差异能影响选择 | M/L 数据 |
+| # | 优先级 | 任务 | 说明 | 依赖 |
+|---|--------|------|------|------|
+| 1 | **P0** | **M/L sparse 策略重设计** | 当前 kr 被 max_frames cap 吃掉。方案：kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | GPT Review |
+| 2 | **P0** | **Content-adaptive sparsification** | 根据视频内容动态调整 kr（解决逐视频波动大的 tail case） | #1 |
+| 3 | **P1** | **Naive baseline 对比** | uniform/random 采帧 vs AV-LRM → 证明打分公式价值（GPT 大概率会问） | 无 |
+| 4 | **P1** | P/B 帧选择策略 | GOP 内选关键帧，解决"只取 I 帧太粗" | #1 |
+| 5 | **P1** | Sparse@64 + Baseline@64 OOM 验证 | 验证稀疏化扩展能力边界（但非独特贡献，所有稀疏化方法均可） | 无 |
+| 6 | **P2** | alpha 在长视频验证 | 长视频 GOP 多（>20），alpha 差异能影响选择 | M/L 数据 |
+| 7 | **P2** | 论文表格 + Pareto 曲线图 | 待论文故事线和补充实验确定后生成 | #1-#3 |
 
-### Phase 3（扩展 + 对比）
+### Phase 3（架构扩展 — 其他两大技术支柱）
 
 | # | 任务 | 说明 |
 |---|------|------|
-| 10 | Ring Buffer CPU/GPU 异步预取 | 批量场景隐藏预处理延迟 |
-| 11 | 与 naive 方法对比 | uniform / random sampling vs AV-LRM |
-| 12 | 多 benchmark 交叉验证 | Video-MME + ActivityNet-QA |
-| 13 | Patch 级稀疏化 | 帧内部哪些区域重要 |
+| 8 | **显存碎片优化** | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 |
+| 9 | **Ring Buffer 流水线** | CPU/GPU 异步预取，批量场景隐藏预处理延迟 |
+| 10 | 多 benchmark 交叉验证 | Video-MME + MVBench / LongVideoBench |
+| 11 | 跨模型泛化验证 | 在其他 Omni 模型上验证框架通用性 |
+| 12 | Patch 级稀疏化 | 帧内部哪些区域重要（可选探索方向） |
 
 ---
 
 ## 已知问题
 
-- [ ] **音频“兖底”效应未验证**：kr=0.2 不掉精度可能是因为完整音频 token 在补偿，需去音频消融分离贡献
-- [ ] **GOP 粒度太粗**：短视频中位数仅 5 个 GOP，alpha 参数和打分公式无法体现价值
+- [x] **音频"兜底"效应已验证**：去音频后仅多降 1.8pp（67.6% vs 69.4%），兜底效应很小，视觉稀疏本身鲁棒
+- [ ] **GOP 粒度太粗**：短视频中位数仅 5 个 GOP，alpha 参数和打分公式无法体现价值 → Phase 2 帧级选择
 - [ ] **I 帧解码是全解码**：`container.decode()` 遍历全帧再过滤 keyframe，CPU 侧无加速（但不是瓶颈）
 - [x] **ActivityNet-QA 采样 bug**：按 QA 对采样而非按视频，50 题仅 16 独立视频→已切换到 Video-MME 规避，不再使用 ActivityNet-QA 作主实验
 - [x] **Video-MME "short" 实际 52-111s**：已确认是官方定义，baseline 用 max_frames=32 解决
 - [x] **Sparse OOM 修复**：max_frames=32 上限 + 音频截断到选中 GOP 时间范围，300/300 全部跑通
 - [x] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录）
-- [x] **Baseline 完整评估**：300/300, 62.0%, 0 errors
 - [ ] **M/L 视频 sparse 无效**：max_frames=32 限制使 sparse 在 M/L 上帧数、token 数与 baseline 完全一致。需要改进帧选择策略或提高 max_frames
 - [ ] **Short 视频逐视频波动大**：部分视频准确率暴跌 66pp（关键帧丢失），部分提升 33pp（去噪效果）
 - [x] **音频+视频提取死锁**：某些视频导致 `torchvision.io.read_video`/`av.open`/`librosa.load` C 扩展永久阻塞，SIGALRM 无法打断。修复：monkey-patch `fetch_video` + `process_audio_info` + `librosa.load`，全部改为 ffmpeg/ffprobe subprocess + timeout。详见变更日志 [2.18 PM]
@@ -241,6 +236,8 @@
 4. **`pipeline.py` 保持简洁**：所有 hack/workaround 放在 `eval_videomme.py` 开头的 monkey-patch 区域，pipeline.py 只做直接调用。
 5. **超时保护**：所有外部 I/O（视频/音频读取）必须用 `subprocess.run(timeout=N)` 包裹，不依赖 SIGALRM（C 扩展无法打断）。
 6. **实验数据安全**：每个 mode/kr 值独立输出目录，增量 CSV 实时写入，崩溃不丢已完成数据。
+7. **GPT Review 规范**：每完成一个 Phase，更新 `gpt_review_prompt.md` 并发给 GPT 审查。Review 结果记录在外部反馈区域，作为下一阶段优先级调整的依据。
+8. **关注同方向工作**：边做边关注视频 token 稀疏化领域的相关工作（导师要求），记录在下方“相关工作”区域。
 
 ---
 
@@ -255,8 +252,22 @@
 
 ---
 
+## 相关工作（视频 token 稀疏化方向）
+
+> 边做边关注的同方向工作，用于论文 Related Work 和差异化分析。
+
+| 方法 | 核心思路 | 与我们的差异 | 状态 |
+|------|----------|------------|------|
+| FastV | Attention-based token pruning in ViT | 帧内 patch 级 vs 我们帧级 GOP 级 | 待调研 |
+| LLaVA-PruMerge | 融合+剪枝 visual tokens | 模型内部 vs 我们预处理阶段 | 待调研 |
+| TokenPacker | 压缩 visual token sequence | token 压缩 vs 帧选择 | 待调研 |
+| VideoLLM-online | 流式视频理解 | 在线处理 vs 我们离线 | 待调研 |
+
+---
+
 ## 变更日志
 
+- **[2.19]** Phase 1 收尾：更新三大技术支柱架构、Phase 2 方向、GPT Review 规范、相关工作跟踪区域。
 - **[2.19]** 去音频消融完成：108/108，67.6%。音频仅恢复 1.8pp，视觉稀疏本身鲁棒。修复 sparse_no_audio 模式 bug（use_audio_in_video=False）+ resume 逻辑加固（忽略无效记录）。
 - **[2.18 PM]** **死锁修复（三阶段）**：C 扩展永久阻塞 → ①monkey-patch 改 ffmpeg subprocess ②SIGALRM→SIG_DFL 内核级 watchdog（GIL 被 C 扩展独占时 Python 线程全部阻塞，threading.Timer 无效）③增量 CSV 自动恢复（重启跳过已完成样本）。
 - **[2.18 PM]** kr 消融完成：6 模式 × 108 题全部跑通。核心发现：精度对 kr 不敏感（68.5%~70.4%），kr=0.2 即 3.7x 加速 -5.5pp。
