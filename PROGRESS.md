@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 1 完成，等待 GPT Review 后进入 Phase 2**。核心发现：①精度对 kr 不敏感（kr=0.2~0.9 准确率 68.5%~70.4%）②音频兜底效应很小（仅 1.8pp），视觉稀疏化本身鲁棒。GPT Review Prompt 已就绪（`gpt_review_prompt.md`），Review 结果将决定 Phase 2 优先级。
+**Phase 1 完成，GPT Review 已完成，进入 Phase 2**。Phase 1 核心发现：①精度对 kr 不敏感（kr=0.2~0.9 准确率 68.5%~70.4%）②音频兜底效应很小（仅 1.8pp），视觉稀疏化本身鲁棒。GPT-5.2 Review 发现 3 Critical + 5 Major 问题（详见外部反馈 [2.19]），Phase 2 优先级据此重排。**下一步**：Phase 2 P0 补充实验（naive baselines → modality baselines → Sparse@64 → 音频公平性），约 5h 工作量。
 
 ---
 
