@@ -8,7 +8,37 @@
 
 ## 当前阶段
 
-**Phase 1 完成，GPT Review 已完成，进入 Phase 2**。Phase 1 核心发现：①精度对 kr 不敏感（kr=0.2~0.9 准确率 68.5%~70.4%）②音频兜底效应很小（仅 1.8pp），视觉稀疏化本身鲁棒。GPT-5.2 Review 发现 3 Critical + 5 Major 问题（详见外部反馈 [2.19]），Phase 2 优先级据此重排。**下一步**：Phase 2 P0 补充实验（naive baselines → modality baselines → Sparse@64 → 音频公平性），约 5h 工作量。
+**Phase 2 实验运行中**。P0 #1 Naive Baselines 代码已完成，用户正在按序运行以下 3 组实验：
+
+**实验 1 — Naive baselines 全量对比**（P0 #1，~2h）：
+```bash
+python fasteromni/eval_videomme.py \
+    --duration short --keep-ratio 0.5 \
+    --modes baseline sparse naive_uniform naive_random naive_iframe \
+    --out-dir /root/autodl-tmp/results/fasteromni/naive_comparison
+```
+
+**实验 2 — Sparse@64 vs Baseline@64**（P0 #3，~30min）：
+```bash
+python fasteromni/eval_videomme.py \
+    --duration short --keep-ratio 0.5 \
+    --modes baseline sparse --max-frames 64 \
+    --out-dir /root/autodl-tmp/results/fasteromni/sparse64
+```
+
+**实验 3 — Naive baselines kr=0.2**（验证极端稀疏，~2h）：
+```bash
+python fasteromni/eval_videomme.py \
+    --duration short --keep-ratio 0.2 \
+    --modes sparse naive_uniform naive_random naive_iframe \
+    --out-dir /root/autodl-tmp/results/fasteromni/naive_comparison_kr02
+```
+
+**下一步（新对话 Agent 接手）**：
+1. 检查上述 3 组实验结果（CSV/summary），汇总分析
+2. 将结果填入 `gpt_review_prompt.md` 发给 GPT 审查
+3. 实现 P0 #2 Modality baselines（text-only / audio-only / video-only），需在 `pipeline.py` 新增代码
+4. 更新 PROGRESS.md 实验数据区域
 
 ---
 
@@ -37,7 +67,7 @@
 | 音频能量 | `fasteromni/modules/audio_energy.py` | ✅ 完成 | RMS 能量按 GOP 时间窗口切分正常 | — | — |
 | AV-LRM 打分 | `fasteromni/modules/sparse.py` | ✅ 完成 | 归一化顺序+Uniform 偏置已修 | — | alpha 消融显示 GOP 粒度下无区分度 |
 | I 帧解码 | `fasteromni/modules/frame_decoder.py` | ✅ 完成 | 全解码后过滤 keyframe（已知限制） | — | 后续考虑 seek-based 选择性解码 |
-| Pipeline | `fasteromni/pipeline.py` | ✅ 完成 | baseline+sparse+sparse_no_audio 三模式 | — | — |
+| Pipeline | `fasteromni/pipeline.py` | ✅ 完成 | baseline+sparse+sparse_no_audio+naive_{uniform,random,iframe} 六模式 | — | — |
 | 评估器(EM) | `fasteromni/evaluator.py` | ✅ 完成 | NLTK 版 11/11 self-test 通过 | — | Video-MME 不需要 EM |
 | ActivityNet 评估 | `fasteromni/eval_accuracy.py` | ✅ 完成 | 50 样本消融跑通 | 仅 16 独立视频 | 不作为论文主实验 |
 | Video-MME 评估 | `fasteromni/eval_videomme.py` | ✅ 完成 | Baseline+Sparse 300/300, kr消融 6×108 | 死锁已修 | 去音频消融 |
@@ -164,7 +194,7 @@
 
 | # | 优先级 | 任务 | GPT Review 级别 | 说明 | 预估 |
 |---|--------|------|-----------------|------|------|
-| 1 | **P0** | **Naive baselines 对比** | Critical #1 | 等间隔/随机/只取I帧不打分，同帧数对比 → 证明 AV-LRM 优于 naive | ~2h |
+| 1 | **P0** | ~~**Naive baselines 对比**~~ | Critical #1 | ✅ 代码完成+smoke test 通过。naive_uniform/naive_random/naive_iframe 三策略，同帧数对比。待跑 Short 108 题全量实验 | ✅ done |
 | 2 | **P0** | **Modality baselines** | Major #2 | text-only / audio-only / video-only 下界 → 确认模型吃了多少视觉信息 | ~2h |
 | 3 | **P0** | **Sparse@64 vs Baseline@64** | Critical #3 | 验证稀疏化扩展能力边界，打穿"只对短视频有效" | ~30min |
 | 4 | **P0** | **音频公平性修复** | Critical #2 | baseline 也做音频截断，或明确报告音频 token 差异（实测仅 7.9%） | ~1h |
@@ -277,6 +307,8 @@
 
 ## 变更日志
 
+- **[2.19 PM-2]** 确认 3 组 Phase 2 实验命令并启动：①Naive baselines 全量 5mode×108题 ②Sparse@64 vs Baseline@64 ③Naive kr=0.2。用户按序运行中，新对话 Agent 负责结果分析。
+- **[2.19 PM]** Phase 2 P0 #1 完成：Naive baselines 代码实现。`pipeline.py` 新增 `run_naive(strategy=uniform|random|iframe_uniform)`，`eval_videomme.py` 新增 `--modes naive_uniform naive_random naive_iframe`。Smoke test 3 视频 9 题全部通过，VisTok 一致（4560）确认帧数匹配。修复 bug：strategy 映射 naive_iframe→iframe_uniform。
 - **[2.19]** GPT-5.2 Phase 1 Review 完成，发现 3 Critical + 5 Major 问题。Phase 2 优先级据此重排。
 - **[2.19]** Phase 1 收尾：更新三大技术支柱架构、Phase 2 方向、GPT Review 规范、相关工作跟踪区域。
 - **[2.19]** 去音频消融完成：108/108，67.6%。音频仅恢复 1.8pp，视觉稀疏本身鲁棒。修复 sparse_no_audio 模式 bug（use_audio_in_video=False）+ resume 逻辑加固（忽略无效记录）。

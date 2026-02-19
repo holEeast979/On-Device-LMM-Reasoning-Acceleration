@@ -14,7 +14,10 @@ Usage:
 from __future__ import annotations
 
 import gc
+import json as _json
+import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -22,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from PIL import Image
 
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SCRIPT_ROOT not in sys.path:
@@ -31,6 +35,56 @@ from fasteromni.modules.gop_parser import parse_gops, GOPAnalysis
 from fasteromni.modules.audio_energy import extract_audio_energy_per_gop, extract_audio_from_video
 from fasteromni.modules.sparse import score_gops, select_gops, get_selection_summary, ScoredGOP
 from fasteromni.modules.frame_decoder import decode_i_frames
+
+
+def _ffprobe_info(path: str, timeout: int = 15) -> dict:
+    """获取视频元数据（fps、总帧数、分辨率）"""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate,nb_frames,duration",
+        "-show_entries", "format=duration", "-of", "json", path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}")
+    info = _json.loads(r.stdout)
+    stream = info["streams"][0]
+    width, height = int(stream["width"]), int(stream["height"])
+    rfr = stream.get("r_frame_rate", "30/1")
+    num, den = rfr.split("/")
+    fps = float(num) / float(den) if float(den) != 0 else 30.0
+    nb = stream.get("nb_frames", "N/A")
+    if nb not in ("N/A", "0"):
+        total_frames = int(nb)
+    else:
+        dur = float(stream.get("duration", 0)
+                     or info.get("format", {}).get("duration", 0) or 0)
+        total_frames = max(1, int(dur * fps))
+    return {"width": width, "height": height, "fps": fps,
+            "total_frames": total_frames}
+
+
+def _extract_frames_ffmpeg(path: str, indices: list, width: int, height: int,
+                           timeout: int = 60) -> "list[Image.Image]":
+    """通过 ffmpeg select 滤镜提取指定帧，返回 PIL Image 列表"""
+    select_expr = "+".join(f"eq(n\\,{idx})" for idx in indices)
+    cmd = [
+        "ffmpeg", "-y", "-i", path,
+        "-vf", f"select='{select_expr}'",
+        "-vsync", "vfr", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg frame extraction failed: {r.returncode}")
+    raw = r.stdout
+    frame_size = width * height * 3
+    n_got = len(raw) // frame_size
+    frames = []
+    for i in range(n_got):
+        fb = raw[i * frame_size:(i + 1) * frame_size]
+        arr = np.frombuffer(fb, dtype=np.uint8).reshape(height, width, 3)
+        frames.append(Image.fromarray(arr))
+    return frames
 
 
 @dataclass
@@ -387,6 +441,228 @@ class SparseInferencePipeline:
             result.generate_ms = (time.perf_counter() - t0) * 1000
 
             # 解码输出
+            result.output_text = proc.batch_decode(
+                output_ids[:, inputs["input_ids"].shape[1]:],
+                skip_special_tokens=True
+            )[0]
+
+        except torch.cuda.OutOfMemoryError:
+            result.error = "OOM"
+            self._clear_gpu()
+        except Exception as e:
+            result.error = repr(e) if not str(e) else str(e)
+            import traceback
+            traceback.print_exc()
+
+        result.total_ms = (time.perf_counter() - t_start) * 1000
+        self._clear_gpu()
+        return result
+
+    def run_naive(
+        self,
+        video_path: str,
+        question: str,
+        strategy: str = "uniform",
+        max_new_tokens: int = 256,
+        keep_ratio: float = 0.5,
+        max_frames: int = 32,
+        seed: int = 42,
+        skip_audio: bool = False,
+    ) -> PipelineResult:
+        """
+        Naive baseline 推理：不使用 AV-LRM 打分的帧选择策略。
+
+        策略：
+        - uniform: 从全视频等间隔采 K 帧
+        - random: 从全视频随机采 K 帧
+        - iframe_uniform: 等间隔选 K 个 GOP 的 I 帧（不打分）
+
+        K = min(ceil(N_valid_gops × keep_ratio), max_frames)，
+        保证与 sparse 方法使用相同帧数。
+        """
+        self.load_model()
+        result = PipelineResult(
+            mode=f"naive_{strategy}", video_path=video_path, question=question)
+        t_start = time.perf_counter()
+
+        try:
+            model = self._model
+            proc = self._proc
+
+            # === Step 1: GOP 解析（确定帧数 K，与 sparse 匹配）===
+            t0 = time.perf_counter()
+            gop_analysis = parse_gops(video_path)
+            result.gop_parse_ms = (time.perf_counter() - t0) * 1000
+            result.total_gops = gop_analysis.num_gops
+            result.total_frames = gop_analysis.total_frames
+
+            valid_gops = [g for g in gop_analysis.gops if g.num_frames >= 10]
+            K = max(1, math.ceil(len(valid_gops) * keep_ratio))
+            if max_frames > 0:
+                K = min(K, max_frames)
+            result.selected_gops = K
+            result.keep_ratio_actual = (
+                K / len(valid_gops) if valid_gops else 0)
+
+            # === Step 2: 帧选择（策略相关）===
+            audio_max_end = None
+            if strategy == "iframe_uniform":
+                n_valid = len(valid_gops)
+                if n_valid > 0:
+                    gop_indices = np.linspace(
+                        0, n_valid - 1, min(K, n_valid)).astype(int)
+                else:
+                    gop_indices = np.array([], dtype=int)
+                selected_set = set(gop_indices.tolist())
+                scored_all = [
+                    ScoredGOP(gop=g, visual_score=0, audio_score=0,
+                              combined_score=0, selected=(i in selected_set))
+                    for i, g in enumerate(valid_gops)
+                ]
+                t0 = time.perf_counter()
+                frames_pil, decode_ms = decode_i_frames(
+                    video_path, scored_all)
+                if max_frames > 0 and len(frames_pil) > max_frames:
+                    idx = np.linspace(
+                        0, len(frames_pil) - 1, max_frames).astype(int)
+                    frames_pil = [frames_pil[j] for j in idx]
+                result.i_frame_decode_ms = decode_ms
+                sel_gops = [valid_gops[i] for i in gop_indices]
+                if sel_gops:
+                    audio_max_end = max(
+                        g.end_time_sec or 0 for g in sel_gops)
+
+            elif strategy in ("uniform", "random"):
+                t0 = time.perf_counter()
+                info = _ffprobe_info(video_path)
+                total = info["total_frames"]
+                if strategy == "uniform":
+                    frame_indices = np.linspace(
+                        0, total - 1, K).astype(int).tolist()
+                else:
+                    rng = np.random.RandomState(seed)
+                    frame_indices = sorted(
+                        rng.choice(
+                            total, size=min(K, total), replace=False
+                        ).tolist()
+                    )
+                frames_pil = _extract_frames_ffmpeg(
+                    video_path, frame_indices,
+                    info["width"], info["height"])
+                result.i_frame_decode_ms = (
+                    time.perf_counter() - t0) * 1000
+            else:
+                raise ValueError(f"Unknown naive strategy: {strategy}")
+
+            result.num_frames_input = len(frames_pil)
+            if not frames_pil:
+                result.error = "No frames extracted"
+                result.total_ms = (
+                    time.perf_counter() - t_start) * 1000
+                return result
+
+            # === Step 3: 音频提取 ===
+            t0 = time.perf_counter()
+            audio_waveform, sr = extract_audio_from_video(
+                video_path, sr=16000)
+            result.audio_extract_ms = (time.perf_counter() - t0) * 1000
+
+            if (audio_waveform is not None and not skip_audio
+                    and audio_max_end is not None):
+                max_samples = int((audio_max_end + 1.0) * sr)
+                if len(audio_waveform) > max_samples:
+                    audio_waveform = audio_waveform[:max_samples]
+
+            result.preprocess_ms = (result.gop_parse_ms
+                                    + result.audio_extract_ms
+                                    + result.i_frame_decode_ms)
+
+            # === Step 4: 构造模型输入（与 sparse 路径一致）===
+            t0 = time.perf_counter()
+            from qwen_omni_utils.v2_5.vision_process import (
+                IMAGE_FACTOR, VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS,
+                VIDEO_TOTAL_PIXELS, FRAME_FACTOR, smart_resize,
+            )
+            from torchvision.transforms.functional import resize as tv_resize
+            from torchvision.transforms import InterpolationMode
+
+            nframes = len(frames_pil)
+            first = frames_pil[0]
+            width, height = first.size
+
+            max_pixels = max(
+                min(VIDEO_MAX_PIXELS,
+                    VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR),
+                int(VIDEO_MIN_PIXELS * 1.05)
+            )
+            resized_height, resized_width = smart_resize(
+                height, width, factor=IMAGE_FACTOR,
+                min_pixels=VIDEO_MIN_PIXELS, max_pixels=max_pixels,
+            )
+
+            frame_tensors = []
+            for img in frames_pil:
+                arr = np.array(img)
+                t = torch.from_numpy(arr).permute(2, 0, 1).float()
+                frame_tensors.append(t)
+            video_tensor = torch.stack(frame_tensors)
+            video_tensor = tv_resize(
+                video_tensor, [resized_height, resized_width],
+                interpolation=InterpolationMode.BICUBIC, antialias=True,
+            ).float()
+
+            video_ele = {"type": "video", "video": str(video_path)}
+            conversation = [{"role": "user", "content": [
+                video_ele, {"type": "text", "text": question}]}]
+
+            audio_arg = (None if skip_audio
+                         else ([audio_waveform]
+                               if audio_waveform is not None else None))
+            text = proc.apply_chat_template(
+                conversation, tokenize=False,
+                add_generation_prompt=True)
+            inputs = proc(
+                text=text, videos=[video_tensor], audio=audio_arg,
+                use_audio_in_video=(not skip_audio),
+                return_tensors="pt", padding=True,
+            )
+            inputs = inputs.to(model.device)
+            result.tokenize_ms = (time.perf_counter() - t0) * 1000
+
+            # === Step 5: Token 统计 ===
+            if "input_ids" in inputs:
+                from utils.profiling_utils import (
+                    get_mm_token_ids_from_tokenizer)
+                tok = getattr(proc, "tokenizer", proc)
+                mm = get_mm_token_ids_from_tokenizer(tok)
+                ids = inputs["input_ids"][0]
+                vision_ids = set(
+                    int(x) for x in
+                    mm.get("vision_special_token_ids", []) or [])
+                audio_ids = set(
+                    int(x) for x in
+                    mm.get("audio_special_token_ids", []) or [])
+                result.visual_tokens = (
+                    sum(int((ids == tid).sum().item())
+                        for tid in vision_ids)
+                    if vision_ids else 0)
+                result.audio_tokens = (
+                    sum(int((ids == tid).sum().item())
+                        for tid in audio_ids)
+                    if audio_ids else 0)
+                result.total_tokens = int(ids.shape[-1])
+
+            # === Step 6: Generate ===
+            self._sync_devices()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs, max_new_tokens=max_new_tokens,
+                    do_sample=False, return_audio=False,
+                )
+            self._sync_devices()
+            result.generate_ms = (time.perf_counter() - t0) * 1000
+
             result.output_text = proc.batch_decode(
                 output_ids[:, inputs["input_ids"].shape[1]:],
                 skip_special_tokens=True

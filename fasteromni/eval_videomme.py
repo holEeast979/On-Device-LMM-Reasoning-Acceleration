@@ -499,6 +499,16 @@ def run_single(
                     skip_audio=True,
                     max_frames=max_frames,
                 )
+            elif mode in ("naive_uniform", "naive_random", "naive_iframe"):
+                _strategy_map = {"naive_iframe": "iframe_uniform"}
+                strategy = _strategy_map.get(mode, mode.replace("naive_", ""))
+                r = pipe.run_naive(
+                    sample.video_path, prompt,
+                    strategy=strategy,
+                    max_new_tokens=max_new_tokens,
+                    keep_ratio=keep_ratio,
+                    max_frames=max_frames,
+                )
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -719,7 +729,8 @@ def main():
     parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="all",
                         help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
-                        choices=["baseline", "sparse", "sparse_no_audio"],
+                        choices=["baseline", "sparse", "sparse_no_audio",
+                                 "naive_uniform", "naive_random", "naive_iframe"],
                         help="Modes to evaluate")
     parser.add_argument("--sweep", choices=["keep_ratio", "alpha", "none"], default="none",
                         help="Run ablation sweep")
