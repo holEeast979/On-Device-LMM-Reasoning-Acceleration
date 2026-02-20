@@ -93,6 +93,14 @@ fasteromni/
 4. **P1 #5 Per-video 统计**
 5. 更新 `gpt_review_prompt.md`
 
+### 编码规范（从 [2.20] 事故中提炼）
+
+1. **不要批量修改 generate 调用参数**：model.generate() 是模型输出的唯一出口，改错一处就全崩。每改一处立即跑 1 视频验证。
+2. **新增实验不动旧代码**：新增函数/模式时，绝不修改已有的、正在工作的函数。如果需要改公共逻辑，先重构抽取公共部分。
+3. **区分 processor 参数和 generate 参数**：`use_audio_in_video` 等参数在 proc() 和 generate() 中含义可能不同，必须查源码确认。
+4. **逐条改动，逐条验证**：每个改动都是独立的 commit，每个 commit 跑 1 视频验证。不要把多个改动攒在一起。
+5. **保持干净的回退点**：每个稳定状态都要 commit + push，确保随时可以 `git checkout` 回退。
+
 ### 为什么选 Video-MME？
 
 Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/D）评估简单可靠（精确匹配），无需 GPT-judge 或规范化 EM 等复杂评估器。覆盖 short/medium/long 三种时长，适合分析 token scaling。
