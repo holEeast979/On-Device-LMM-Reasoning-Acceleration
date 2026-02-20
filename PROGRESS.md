@@ -379,4 +379,4 @@ DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
 - **[2.17]** PROGRESS.md 创建。eval_videomme.py 优化（实时进度 + 超时 + 增量 CSV）。pipeline.py 修复（OOM: max_frames + 音频截断）。
 - **[2.16]** Video-MME 评估 Pipeline 完成。GPT Code Review 6/8 修复。ActivityNet-QA 消融完成。
 - **[2.15]** 串行 Pipeline 跑通。首次 TTFT 对比完成。
-
+- **[2.20 PM]** Modality baselines 全量实验失败排查：108 题 x 4 模态全部输出 !!!!（token id 0），准确率 0%。排查过程：1)排除 conda 环境问题（base/mmlab310 均复现）2)排除 monkey patch 问题（DISABLE_MONKEY_PATCH=1 仍复现）3)发现 [2.20] 错误移除了 use_audio_in_video 参数——该参数实际是 model.generate() 的合法参数（控制 thinker 是否使用视频音轨），不仅是 processor 参数。已将 use_audio_in_video 回填到所有 4 处 generate 调用（baseline=True, sparse/naive=not skip_audio, modality=use_audio）。单次 1 视频 baseline 测试恢复正常（33.3%, pred=B），但 3 视频 x 4 模态测试仍全部 !!!!，说明 use_audio_in_video 不是充分修复。**当前状态：根因未完全定位**，可能还涉及 thinker_max_new_tokens 替换 max_new_tokens、outlier zeroing 不充分、或其他 [2.20] 改动的交互效应。待继续排查。

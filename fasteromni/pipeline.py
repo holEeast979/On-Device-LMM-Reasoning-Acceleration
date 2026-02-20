@@ -243,6 +243,7 @@ class SparseInferencePipeline:
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
+                    use_audio_in_video=True,
                     thinker_max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
@@ -433,6 +434,7 @@ class SparseInferencePipeline:
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
+                    use_audio_in_video=(not skip_audio),
                     thinker_max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
@@ -658,6 +660,7 @@ class SparseInferencePipeline:
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
+                    use_audio_in_video=(not skip_audio),
                     thinker_max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
@@ -799,6 +802,7 @@ class SparseInferencePipeline:
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
+                    use_audio_in_video=use_audio,
                     thinker_max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
