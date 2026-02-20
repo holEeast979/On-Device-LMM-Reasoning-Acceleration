@@ -486,6 +486,12 @@ def run_single(
         with _Timeout(timeout_sec):
             if mode == "baseline":
                 r = pipe.run_baseline(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
+            elif mode == "text_only":
+                r = pipe.run_text_only(sample.video_path, prompt, max_new_tokens)
+            elif mode == "audio_only":
+                r = pipe.run_audio_only(sample.video_path, prompt, max_new_tokens)
+            elif mode == "video_only":
+                r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
@@ -729,7 +735,8 @@ def main():
     parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="all",
                         help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
-                        choices=["baseline", "sparse", "sparse_no_audio",
+                        choices=["baseline", "text_only", "audio_only", "video_only",
+                                 "sparse", "sparse_no_audio",
                                  "naive_uniform", "naive_random", "naive_iframe"],
                         help="Modes to evaluate")
     parser.add_argument("--sweep", choices=["keep_ratio", "alpha", "none"], default="none",

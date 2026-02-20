@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**代码已回退到 Phase 1 干净状态**（commit `9390d91`）。[2.20] 的 modality baseline 代码改动导致严重污染（所有模式输出 `!!!!`），已全部撤销。Baseline 已恢复正常（3 视频 9 题 = 66.7%，无退化）。
+**架构重构 + Modality Baselines 已完成**。pipeline.py 完成"帧选择与推理引擎解耦"重构（`model.generate` 从 3 处→1 处），并新增 text_only / audio_only / video_only 三个 modality baseline 模式。6 模式 smoke test 全部通过（Err=0）。全量评估（6 模式 × 300 题）正在运行中。
 
 ### 已完成的实验
 
@@ -389,7 +389,111 @@ Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/
 5. **超时保护**：所有外部 I/O（视频/音频读取）必须用 `subprocess.run(timeout=N)` 包裹，不依赖 SIGALRM（C 扩展无法打断）。
 6. **实验数据安全**：每个 mode/kr 值独立输出目录，增量 CSV 实时写入，崩溃不丢已完成数据。
 7. **GPT Review 规范**：每完成一个 Phase，更新 `gpt_review_prompt.md` 并发给 GPT 审查。Review 结果记录在外部反馈区域，作为下一阶段优先级调整的依据。
-8. **关注同方向工作**：边做边关注视频 token 稀疏化领域的相关工作（导师要求），记录在下方“相关工作”区域。
+8. **关注同方向工作**：边做边关注视频 token 稀疏化领域的相关工作（导师要求），记录在下方"相关工作"区域。
+
+---
+
+## 跨模型工作流规范
+
+> 本项目的标准工作循环。各模型各司其职，数据格式统一，避免手动转换。
+
+### 工作循环
+
+```
+1. Opus 设计方案     → 总结目标、架构设计、实验方案
+2. GPT-Codex 实现   → 根据 Opus 方案写代码、输出规范化数据
+3. 用户跑实验        → tmux 运行，实时看进度
+4. Opus 分析+讨论    → 审查结果、统计分析、文档更新、答疑
+5. GPT 挑刺 Review  → 阶段性出 Review 报告（Critical/Major/Minor）
+```
+
+### 角色边界
+
+| 角色 | 做什么 | 不做什么 |
+|------|--------|---------|
+| **Opus (Windsurf)** | 方案设计、结果分析、文档管理、git 管理、答疑讨论 | 不跑完整实验（只 smoke test） |
+| **GPT-Codex** | 写代码、调 bug、按方案实现 | 不做决策、不自行设计方案 |
+| **GPT Review** | 阶段性挑刺报告（Critical→Major→Minor） | 不重复分析、只报告硬伤 |
+| **用户** | 跑实验、决策、跨模型传递信息 | — |
+
+### GPT-Codex 代码输出要求
+
+**核心原则**：代码输出必须是"分析就绪"的，Opus 拿到 CSV/JSON 后不需要手动格式转换。
+
+1. 所有实验结果按"实验输出标准"（下方）格式化
+2. 每个改动都附 smoke test 验证命令（`--max-videos 1` 或 `--max-videos 3`）
+3. 代码中不硬编码实验参数，通过 argparse 暴露
+4. 输出目录结构清晰，支持增量写入和断点续跑
+
+### GPT Review 规范
+
+每完成一个 Phase 或重大实验后，让 GPT 出一份 Review 报告：
+- **Critical**：不修论文站不住（如统计方法错误、实验设计缺陷）
+- **Major**：修了论文更强（如缺少对比、解释不充分）
+- **Minor**：代码/文档小问题
+- 格式参考 `gpt_review_prompt.md`
+
+---
+
+## 实验输出标准
+
+> 所有实验代码（`eval_videomme.py` 等）的输出必须遵循此标准，确保下游分析 Agent 可直接消费。
+
+### 逐条 CSV 标准列
+
+```
+question_id, video_file_id, duration, domain, task_type,
+mode, keep_ratio, alpha,
+gt_answer, pred_answer, correct,
+generate_ms, total_ms, visual_tokens, audio_tokens, total_tokens,
+num_frames, error, pred_raw
+```
+
+**关键约束**：
+- `video_file_id` 必须存在 → 支持 per-video 聚合（GPT Review P1 #5）
+- `duration` / `task_type` 必须存在 → 支持切片分析
+- `pred_raw` 保留模型原始输出 → 支持事后 debug 和答案提取改进
+- 数值列用 float（ms 单位），布尔列用 True/False 字符串
+
+### 汇总 JSON 标准结构
+
+```json
+[{
+  "label": "mode_name(kr=X)",
+  "total_samples": 300,
+  "valid_samples": 298,
+  "errors": 2,
+  "overall_accuracy": 62.0,
+  "avg_generate_ms": 2841.0,
+  "avg_visual_tokens": 10737,
+  "by_duration": {
+    "short":  {"count": 108, "accuracy": 75.9, ...},
+    "medium": {"count": 90,  "accuracy": 62.2, ...},
+    "long":   {"count": 102, "accuracy": 48.0, ...}
+  }
+}]
+```
+
+### 输出目录结构
+
+```
+/root/autodl-tmp/results/fasteromni/<experiment_name>/
+├── <mode>/
+│   ├── videomme_<mode>_details.csv    # 逐条
+│   └── videomme_<mode>_summary.json   # 汇总
+├── videomme_combined_details.csv       # 所有 mode 合并
+├── videomme_combined_summary.json      # 所有 mode 汇总
+└── <experiment_name>.log               # 运行日志
+```
+
+### 元数据记录（推荐）
+
+在 summary JSON 或独立 `metadata.json` 中记录实验环境：
+- `git_hash`：当前 commit
+- `timestamp`：运行开始时间
+- `args`：完整命令行参数
+- `gpu_info`：GPU 型号 + 显存
+- `model_dir`：模型路径
 
 ---
 
@@ -419,6 +523,7 @@ Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/
 
 ## 变更日志
 
+- **[2.21]** **架构重构 + Modality Baselines 完成**：①pipeline.py 完成"帧选择与推理引擎解耦"重构——新增 SelectedFrames 数据类、_run_inference() 统一推理引擎（generate 从 3 处→1 处）、_frames_to_video_tensor() 和 _count_tokens() 工具方法。3 个 run_* 方法变为 select + _run_inference 薄包装。②新增 text_only / audio_only / video_only 三个 modality baseline 模式（_select_* + run_* + eval_videomme.py 分发）。③6 模式 × 1 视频 smoke test 全部通过（Err=0）。④PROGRESS.md 新增"跨模型工作流规范"和"实验输出标准"章节。⑤全量评估（6 模式 × 300 题）已启动。
 - **[2.20 PM-3]** **代码清理与架构梳理**：①将 6 个废弃 Phase 1 脚本归档到 `fasteromni/phase1_archive/`（run_ablation/run_comparison/eval_accuracy/evaluator/analyze_scoring/analyze_gop）②完成代码架构总结：当前在用文件仅 pipeline.py + eval_videomme.py + modules/ ③提出架构改进建议：帧选择与推理引擎解耦（避免重复代码和批量改动风险）④制定 Modality Test 重新规划方案 ⑤PROGRESS.md 全面更新，为新对话 Agent 提供完整交接信息。
 - **[2.20 PM-2]** **代码回退**：[2.20] 的 modality baseline 改动导致严重污染（所有模式输出 `!!!!`），已将 `pipeline.py`、`eval_videomme.py`、`common.py` 全部恢复到 `9390d91`（Phase 1 干净状态）。回退后 baseline 验证正常（3 视频 9 题 = 66.7%）。
 - **[2.20]** Modality baselines 实现尝试（已撤销）：修改了 `pipeline.py` 4 处 generate 调用（添加 `use_audio_in_video`、`thinker_max_new_tokens`）、`common.py`（outlier zeroing、generate 参数）、`eval_videomme.py`（`DISABLE_MONKEY_PATCH` 开关、modality 模式）。改动导致全面退化，经多轮排查未能完全定位根因，最终决定全部撤销。**教训**：不要同时改动多处 generate 调用参数，应逐条验证。
