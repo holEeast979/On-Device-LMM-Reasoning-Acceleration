@@ -39,10 +39,18 @@ DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
 
 ### 下一步（新对话 Agent 接手）
 
-1. **跑 Modality baselines 完整评估**（上述命令）
-2. **分析结果**：确认 text-only 是否为语言先验下界，audio-only 贡献多少
-3. **继续 Phase 2 待办**：P0 #4 音频公平性修复、P1 #5 Per-video 统计
-4. **更新 `gpt_review_prompt.md`** 加入 modality baseline 结果
+> ⚠️ **用户已自行启动上述完整 Modality baselines 命令**。新 Agent 接手时先检查结果。
+
+**情况 A：实验已跑完**（结果在 `/root/autodl-tmp/results/fasteromni/modality_baselines/`）
+1. 分析 4 个模式的准确率，确认 text-only 是语言先验下界，audio/video 各贡献多少
+2. 将结果填入 PROGRESS.md 实验数据区域
+3. 更新 `gpt_review_prompt.md` 加入 modality baseline 结果
+4. 继续 Phase 2 待办：P0 #4 音频公平性修复、P1 #5 Per-video 统计
+
+**情况 B：实验因死锁卡住**（某个视频 >5 分钟无进展）
+1. 检查增量 CSV 确认已完成多少（eval 脚本有 resume 逻辑，重启会跳过已完成样本）
+2. 如需修复：实现进程级隔离（`multiprocessing.Process` + timeout）替代 monkey-patch
+3. 或者手动跳过死锁视频后重启
 
 ---
 
