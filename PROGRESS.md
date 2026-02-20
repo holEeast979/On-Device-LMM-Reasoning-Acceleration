@@ -8,37 +8,41 @@
 
 ## 当前阶段
 
-**Phase 2 实验运行中**。P0 #1 Naive Baselines 代码已完成，用户正在按序运行以下 3 组实验：
+**Phase 2 P0 #1~#3 全部完成**。Modality baselines 代码已写好并通过 smoke test（3 视频 9 题）。
 
-**实验 1 — Naive baselines 全量对比**（P0 #1，~2h）：
+### 已完成的实验
+
+| # | 实验 | 状态 | 结果位置 |
+|---|------|------|---------|
+| P0 #1 | Naive baselines 全量对比 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison/` |
+| P0 #2 | Modality baselines 代码 | ✅ smoke test 通过 | smoke: `/root/autodl-tmp/results/fasteromni/modality_smoke/` |
+| P0 #3 | Sparse@64 vs Baseline@64 | ✅ | `/root/autodl-tmp/results/fasteromni/sparse64/` |
+| 补充 | Naive kr=0.2 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison_kr02/` |
+
+### 待跑：Modality baselines 完整评估（P0 #2）
+
 ```bash
-python fasteromni/eval_videomme.py \
-    --duration short --keep-ratio 0.5 \
-    --modes baseline sparse naive_uniform naive_random naive_iframe \
-    --out-dir /root/autodl-tmp/results/fasteromni/naive_comparison
+DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
+    --duration short \
+    --modes baseline video_only text_only audio_only \
+    --out-dir /root/autodl-tmp/results/fasteromni/modality_baselines
 ```
+预估 ~1.5h（4 模式 × 108 题，baseline 含视频处理较慢）。需要 `DISABLE_MONKEY_PATCH=1` 禁用死锁 patch（monkey-patch 有独立退化问题未解决，但 Short 视频 Phase 1 跑完 300 题未遇到死锁）。
 
-**实验 2 — Sparse@64 vs Baseline@64**（P0 #3，~30min）：
-```bash
-python fasteromni/eval_videomme.py \
-    --duration short --keep-ratio 0.5 \
-    --modes baseline sparse --max-frames 64 \
-    --out-dir /root/autodl-tmp/results/fasteromni/sparse64
-```
+### 重要修复记录（[2.20] 本次对话）
 
-**实验 3 — Naive baselines kr=0.2**（验证极端稀疏，~2h）：
-```bash
-python fasteromni/eval_videomme.py \
-    --duration short --keep-ratio 0.2 \
-    --modes sparse naive_uniform naive_random naive_iframe \
-    --out-dir /root/autodl-tmp/results/fasteromni/naive_comparison_kr02
-```
+修复了两个导致模型输出全为 `!!!!` 的严重 bug：
+1. **`common.py`**：bf16+device_map=auto 加载后 `layers.2.mlp.down_proj.weight` 出现 1e36 outlier → 加载后 zeroing >1e10 修复
+2. **`pipeline.py`**：GPT 错误将 `use_audio_in_video=True` 加入 `model.generate()` → 已从所有 4 处 generate 调用移除
 
-**下一步（新对话 Agent 接手）**：
-1. 检查上述 3 组实验结果（CSV/summary），汇总分析
-2. 将结果填入 `gpt_review_prompt.md` 发给 GPT 审查
-3. 实现 P0 #2 Modality baselines（text-only / audio-only / video-only），需在 `pipeline.py` 新增代码
-4. 更新 PROGRESS.md 实验数据区域
+另外将所有 generate 调用的 `max_new_tokens` 统一改为 `thinker_max_new_tokens`（Qwen2.5-Omni 特有参数，原 `max_new_tokens` 被静默忽略）。Phase 1 结果不受影响（当时靠 EOS 自然停止）。
+
+### 下一步（新对话 Agent 接手）
+
+1. **跑 Modality baselines 完整评估**（上述命令）
+2. **分析结果**：确认 text-only 是否为语言先验下界，audio-only 贡献多少
+3. **继续 Phase 2 待办**：P0 #4 音频公平性修复、P1 #5 Per-video 统计
+4. **更新 `gpt_review_prompt.md`** 加入 modality baseline 结果
 
 ---
 
@@ -159,6 +163,51 @@ python fasteromni/eval_videomme.py \
 
 规律：计数/属性类损失大；总结/空间类不受影响甚至提升。
 
+### Phase 2 实验结果
+
+**实验 1 — Naive Baselines 全量对比（Short 108 题，kr=0.5，同帧数）**：
+
+| 模式 | Accuracy | Drop vs BL | Avg Gen(ms) | Speedup | VisTok |
+|------|----------|-----------|-------------|---------|--------|
+| baseline | 75.93% | — | 2,144 | 1.0x | 10,737 |
+| **naive_iframe** | **75.93%** | **0.0pp** | 1,096 | **2.0x** | 4,939 |
+| naive_uniform | 74.07% | -1.9pp | 1,105 | 1.9x | 4,939 |
+| naive_random | 73.15% | -2.8pp | 1,102 | 1.9x | 4,939 |
+| sparse (AV-LRM) | 69.44% | -6.5pp | 1,085 | 2.0x | 4,939 |
+
+⚠️ **关键发现：AV-LRM 在 kr=0.5 时是最差策略**。naive_iframe 与 baseline 准确率完全一致（75.93%），所有 naive 策略均优于 AV-LRM。VisTok 完全一致确认帧数匹配正确。
+
+**实验 2 — Sparse@64 vs Baseline@64（扩展能力验证）**：
+
+| 模式 | Valid | Errors | Accuracy* | Avg Gen(ms) | VisTok |
+|------|-------|--------|----------|-------------|--------|
+| baseline@64 | 12 | **96 OOM** | 83.3%* | 2,017 | 8,944 |
+| sparse@64 | 108 | **0** | 70.37% | 1,083 | 4,959 |
+
+*baseline 准确率基于仅存 12 个样本（存活偏差），不可直接对比。
+
+⚠️ **关键发现：Baseline@64 有 89% OOM，Sparse@64 零 OOM**。直接证明稀疏化扩展帧预算边界——相同硬件下可 max_frames 从 32→64 而不 OOM。
+
+**实验 3 — Naive Baselines kr=0.2（极端稀疏验证）**：
+
+| 模式 | Accuracy | Drop vs BL | Avg Gen(ms) | Speedup | VisTok |
+|------|----------|-----------|-------------|---------|--------|
+| **sparse (AV-LRM)** | **70.37%** | -5.6pp | **586** | **3.7x** | 2,192 |
+| naive_iframe | 68.52% | -7.4pp | 620 | 3.5x | 2,192 |
+| naive_uniform | 67.59% | -8.3pp | 622 | 3.5x | 2,192 |
+| naive_random | 63.89% | -12.0pp | 622 | 3.5x | 2,192 |
+
+⚠️ **关键发现：排名反转！AV-LRM 在 kr=0.2 时成为最优策略**。比 naive_iframe 高 1.85pp，比 naive_random 高 6.5pp。naive_random 在极端稀疏下暴跌，AV-LRM 的"kr 不敏感"特性本身即为鲁棒性优势。
+
+**交叉分析 — AV-LRM vs Naive 策略排名随 kr 变化**：
+
+| kr | AV-LRM | naive_iframe | naive_uniform | naive_random | AV-LRM 排名 |
+|----|--------|-------------|---------------|-------------|------------|
+| 0.5 | 69.44% | **75.93%** | 74.07% | 73.15% | 最差 (4/4) |
+| 0.2 | **70.37%** | 68.52% | 67.59% | 63.89% | **最优 (1/4)** |
+
+**结论**：AV-LRM 的真正价值是**跨稀疏度的鲁棒性**（69-70% 稳定不变），而非在某个 kr 上碾压 naive。帧预算越紧张，智能选帧越重要。
+
 ---
 
 ## 关键设计决策
@@ -194,9 +243,9 @@ python fasteromni/eval_videomme.py \
 
 | # | 优先级 | 任务 | GPT Review 级别 | 说明 | 预估 |
 |---|--------|------|-----------------|------|------|
-| 1 | **P0** | ~~**Naive baselines 对比**~~ | Critical #1 | ✅ 代码完成+smoke test 通过。naive_uniform/naive_random/naive_iframe 三策略，同帧数对比。待跑 Short 108 题全量实验 | ✅ done |
+| 1 | **P0** | ~~**Naive baselines 对比**~~ | Critical #1 | ✅ 全量完成。kr=0.5: naive_iframe=baseline(75.9%), AV-LRM 最差(69.4%); kr=0.2: AV-LRM 最优(70.4%), 排名反转。结论：AV-LRM 价值在跨 kr 鲁棒性 | ✅ done |
 | 2 | **P0** | **Modality baselines** | Major #2 | text-only / audio-only / video-only 下界 → 确认模型吃了多少视觉信息 | ~2h |
-| 3 | **P0** | **Sparse@64 vs Baseline@64** | Critical #3 | 验证稀疏化扩展能力边界，打穿"只对短视频有效" | ~30min |
+| 3 | **P0** | ~~**Sparse@64 vs Baseline@64**~~ | Critical #3 | ✅ Baseline@64: 96/108 OOM (89%), Sparse@64: 0 OOM. 直接证明稀疏化扩展帧预算边界 | ✅ done |
 | 4 | **P0** | **音频公平性修复** | Critical #2 | baseline 也做音频截断，或明确报告音频 token 差异（实测仅 7.9%） | ~1h |
 | 5 | **P1** | **Per-video 统计** | Major #1 | 按视频为单位报告均值/方差/置信区间 + 配对检验 | ~1h |
 | 6 | **P1** | **M/L sparse 策略重设计** | — | kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | ~3h |
@@ -227,7 +276,8 @@ python fasteromni/eval_videomme.py \
 - [x] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录）
 - [ ] **M/L 视频 sparse 无效**：max_frames=32 限制使 sparse 在 M/L 上帧数、token 数与 baseline 完全一致。需要改进帧选择策略或提高 max_frames
 - [ ] **Short 视频逐视频波动大**：部分视频准确率暴跌 66pp（关键帧丢失），部分提升 33pp（去噪效果）
-- [x] **音频+视频提取死锁**：某些视频导致 `torchvision.io.read_video`/`av.open`/`librosa.load` C 扩展永久阻塞，SIGALRM 无法打断。修复：monkey-patch `fetch_video` + `process_audio_info` + `librosa.load`，全部改为 ffmpeg/ffprobe subprocess + timeout。详见变更日志 [2.18 PM]
+- [x] **模型退化输出 `!!!!` — 已修复**：两个独立根因：① `model.layers.2.mlp.down_proj.weight` 加载后出现 2 个 ~1e36 极端 outlier（磁盘 safetensors 正常，bf16+device_map=auto 加载工件），导致 RMSNorm 溢出→logits 全零→token id 0(`!`)。修复：`common.py` 加载后 zeroing >1e10 的 outlier。② GPT 在修改 `pipeline.py` 时错误将 `use_audio_in_video=True` 加入 `model.generate()` 调用（这是 processor 参数不是 generate 参数），导致模型所有输出退化。修复：移除 generate 中的 `use_audio_in_video`
+- [ ] **音频+视频提取死锁**：某些视频导致 C 扩展永久阻塞。Phase 1 修复：monkey-patch 改 ffmpeg subprocess（详见 [2.18 PM]）。monkey-patch 本身也导致退化（独立于上述两个 bug），已添加 `DISABLE_MONKEY_PATCH=1` 环境变量开关。完整评估时可能需要进程级隔离方案替代
 
 ---
 
@@ -307,6 +357,8 @@ python fasteromni/eval_videomme.py \
 
 ## 变更日志
 
+- **[2.20]** Phase 2 P0 #2 Modality baselines 完成并验证：`pipeline.py` 新增 `run_modality_baseline(modality=video_only|text_only|audio_only)`，`eval_videomme.py` 新增 `--modes video_only text_only audio_only`。Smoke test 3视频9题通过：baseline=55.6%, video_only=66.7%, text_only=33.3%, audio_only=66.7%。修复两个严重 bug：① bf16 加载后权重出现 1e36 outlier（common.py 加 zeroing 修复）② GPT 错误将 `use_audio_in_video` 加入 `model.generate()` 导致所有输出退化为 `!!!!`（已从所有 generate 调用中移除）。另发现 Qwen2.5-Omni 的 `max_new_tokens` 被 `thinker_max_new_tokens` 覆盖，已统一修改。添加 `DISABLE_MONKEY_PATCH=1` 环境变量开关控制死锁 patch。
+- **[2.19 PM-3]** Phase 2 实验分析完成：3 组实验全量结果汇总。核心发现：①AV-LRM 在 kr=0.5 最差、kr=0.2 最优（排名反转），价值在跨 kr 鲁棒性 ②Baseline@64 89% OOM vs Sparse@64 零 OOM，证实稀疏化扩展帧预算 ③naive_iframe 在 kr=0.5 下与 baseline 准确率完全一致（75.93%）。PROGRESS.md 已更新。
 - **[2.19 PM-2]** 确认 3 组 Phase 2 实验命令并启动：①Naive baselines 全量 5mode×108题 ②Sparse@64 vs Baseline@64 ③Naive kr=0.2。用户按序运行中，新对话 Agent 负责结果分析。
 - **[2.19 PM]** Phase 2 P0 #1 完成：Naive baselines 代码实现。`pipeline.py` 新增 `run_naive(strategy=uniform|random|iframe_uniform)`，`eval_videomme.py` 新增 `--modes naive_uniform naive_random naive_iframe`。Smoke test 3 视频 9 题全部通过，VisTok 一致（4560）确认帧数匹配。修复 bug：strategy 映射 naive_iframe→iframe_uniform。
 - **[2.19]** GPT-5.2 Phase 1 Review 完成，发现 3 Critical + 5 Major 问题。Phase 2 优先级据此重排。
