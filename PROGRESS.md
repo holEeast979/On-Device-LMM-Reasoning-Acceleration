@@ -8,49 +8,31 @@
 
 ## 当前阶段
 
-**Phase 2 P0 #1~#3 全部完成**。Modality baselines 代码已写好并通过 smoke test（3 视频 9 题）。
+**代码已回退到 Phase 1 干净状态**（commit `9390d91`）。[2.20] 的 modality baseline 代码改动导致严重污染（所有模式输出 `!!!!`），已全部撤销。Baseline 已恢复正常（3 视频 9 题 = 66.7%，无退化）。
 
 ### 已完成的实验
 
 | # | 实验 | 状态 | 结果位置 |
 |---|------|------|---------|
 | P0 #1 | Naive baselines 全量对比 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison/` |
-| P0 #2 | Modality baselines 代码 | ✅ smoke test 通过 | smoke: `/root/autodl-tmp/results/fasteromni/modality_smoke/` |
 | P0 #3 | Sparse@64 vs Baseline@64 | ✅ | `/root/autodl-tmp/results/fasteromni/sparse64/` |
 | 补充 | Naive kr=0.2 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison_kr02/` |
 
-### 待跑：Modality baselines 完整评估（P0 #2）
+### [2.20] 代码污染事件回顾
 
-```bash
-DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
-    --duration short \
-    --modes baseline video_only text_only audio_only \
-    --out-dir /root/autodl-tmp/results/fasteromni/modality_baselines
-```
-预估 ~1.5h（4 模式 × 108 题，baseline 含视频处理较慢）。需要 `DISABLE_MONKEY_PATCH=1` 禁用死锁 patch（monkey-patch 有独立退化问题未解决，但 Short 视频 Phase 1 跑完 300 题未遇到死锁）。
+modality baseline（text-only / audio-only / video-only）实现尝试导致全面退化：
+- **pipeline.py**：4 处 `model.generate()` 被改坏（添加了不兼容参数、修改了 `max_new_tokens` → `thinker_max_new_tokens`）
+- **common.py**：添加了 outlier zeroing（针对偶发的 bf16 加载工件）和 generate 参数修改
+- **eval_videomme.py**：添加了 `DISABLE_MONKEY_PATCH` 开关和 modality 模式
 
-### 重要修复记录（[2.20] 本次对话）
+**全部已撤销**。三个文件恢复到 `9390d91` 状态。Modality baseline 功能需要在新对话中**从零重新规划实现**，避免触碰 generate 调用内部参数。
 
-修复了两个导致模型输出全为 `!!!!` 的严重 bug：
-1. **`common.py`**：bf16+device_map=auto 加载后 `layers.2.mlp.down_proj.weight` 出现 1e36 outlier → 加载后 zeroing >1e10 修复
-2. **`pipeline.py`**：GPT 错误将 `use_audio_in_video=True` 加入 `model.generate()` → 已从所有 4 处 generate 调用移除
+### 下一步
 
-另外将所有 generate 调用的 `max_new_tokens` 统一改为 `thinker_max_new_tokens`（Qwen2.5-Omni 特有参数，原 `max_new_tokens` 被静默忽略）。Phase 1 结果不受影响（当时靠 EOS 自然停止）。
-
-### 下一步（新对话 Agent 接手）
-
-> ⚠️ **用户已自行启动上述完整 Modality baselines 命令**。新 Agent 接手时先检查结果。
-
-**情况 A：实验已跑完**（结果在 `/root/autodl-tmp/results/fasteromni/modality_baselines/`）
-1. 分析 4 个模式的准确率，确认 text-only 是语言先验下界，audio/video 各贡献多少
-2. 将结果填入 PROGRESS.md 实验数据区域
-3. 更新 `gpt_review_prompt.md` 加入 modality baseline 结果
-4. 继续 Phase 2 待办：P0 #4 音频公平性修复、P1 #5 Per-video 统计
-
-**情况 B：实验因死锁卡住**（某个视频 >5 分钟无进展）
-1. 检查增量 CSV 确认已完成多少（eval 脚本有 resume 逻辑，重启会跳过已完成样本）
-2. 如需修复：实现进程级隔离（`multiprocessing.Process` + timeout）替代 monkey-patch
-3. 或者手动跳过死锁视频后重启
+1. **P0 #2 Modality baselines**：需要重新规划实现方案（新对话）
+2. **P0 #4 音频公平性修复**
+3. **P1 #5 Per-video 统计**
+4. 更新 `gpt_review_prompt.md`
 
 ---
 
@@ -284,8 +266,9 @@ DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
 - [x] **eval 结果覆盖问题**：已修复（每个 mode 保存到独立子目录）
 - [ ] **M/L 视频 sparse 无效**：max_frames=32 限制使 sparse 在 M/L 上帧数、token 数与 baseline 完全一致。需要改进帧选择策略或提高 max_frames
 - [ ] **Short 视频逐视频波动大**：部分视频准确率暴跌 66pp（关键帧丢失），部分提升 33pp（去噪效果）
-- [x] **模型退化输出 `!!!!` — 已修复**：两个独立根因：① `model.layers.2.mlp.down_proj.weight` 加载后出现 2 个 ~1e36 极端 outlier（磁盘 safetensors 正常，bf16+device_map=auto 加载工件），导致 RMSNorm 溢出→logits 全零→token id 0(`!`)。修复：`common.py` 加载后 zeroing >1e10 的 outlier。② GPT 在修改 `pipeline.py` 时错误将 `use_audio_in_video=True` 加入 `model.generate()` 调用（这是 processor 参数不是 generate 参数），导致模型所有输出退化。修复：移除 generate 中的 `use_audio_in_video`
-- [ ] **音频+视频提取死锁**：某些视频导致 C 扩展永久阻塞。Phase 1 修复：monkey-patch 改 ffmpeg subprocess（详见 [2.18 PM]）。monkey-patch 本身也导致退化（独立于上述两个 bug），已添加 `DISABLE_MONKEY_PATCH=1` 环境变量开关。完整评估时可能需要进程级隔离方案替代
+- [x] **[2.20] 代码污染 — 已回退**：modality baseline 实现时同时修改了 4 处 generate 调用参数（`use_audio_in_video`、`thinker_max_new_tokens`）+ common.py（outlier zeroing），导致所有模式输出 `!!!!`。根因未完全定位（多处改动交互效应），最终全部回退到 `9390d91`。**教训**：修改 generate 参数需逐条验证，不要批量改动
+- [ ] **音频+视频提取死锁**：某些视频导致 C 扩展永久阻塞。Phase 1 修复：monkey-patch 改 ffmpeg subprocess（详见 [2.18 PM]）。有 SIGALRM+SIG_DFL 120s 超时保护 + 增量 CSV + resume 逻辑
+- [ ] **偶发 bf16 加载 outlier**：`layers.2.mlp.down_proj.weight` 偶尔出现 ~1e36 值（磁盘正常，加载工件），导致 logits 全零。非每次复现。如需修复可在 `load_qwen25_omni` 后加 outlier zeroing（阈值 >1e10），但当前干净代码未加此修复
 
 ---
 
@@ -365,7 +348,8 @@ DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
 
 ## 变更日志
 
-- **[2.20]** Phase 2 P0 #2 Modality baselines 完成并验证：`pipeline.py` 新增 `run_modality_baseline(modality=video_only|text_only|audio_only)`，`eval_videomme.py` 新增 `--modes video_only text_only audio_only`。Smoke test 3视频9题通过：baseline=55.6%, video_only=66.7%, text_only=33.3%, audio_only=66.7%。修复两个严重 bug：① bf16 加载后权重出现 1e36 outlier（common.py 加 zeroing 修复）② GPT 错误将 `use_audio_in_video` 加入 `model.generate()` 导致所有输出退化为 `!!!!`（已从所有 generate 调用中移除）。另发现 Qwen2.5-Omni 的 `max_new_tokens` 被 `thinker_max_new_tokens` 覆盖，已统一修改。添加 `DISABLE_MONKEY_PATCH=1` 环境变量开关控制死锁 patch。
+- **[2.20 PM-2]** **代码回退**：[2.20] 的 modality baseline 改动导致严重污染（所有模式输出 `!!!!`），已将 `pipeline.py`、`eval_videomme.py`、`common.py` 全部恢复到 `9390d91`（Phase 1 干净状态）。回退后 baseline 验证正常（3 视频 9 题 = 66.7%）。Modality baselines 需要在新对话中从零重新规划。
+- **[2.20]** Modality baselines 实现尝试（已撤销）：修改了 `pipeline.py` 4 处 generate 调用（添加 `use_audio_in_video`、`thinker_max_new_tokens`）、`common.py`（outlier zeroing、generate 参数）、`eval_videomme.py`（`DISABLE_MONKEY_PATCH` 开关、modality 模式）。改动导致全面退化，经多轮排查未能完全定位根因，最终决定全部撤销。**教训**：不要同时改动多处 generate 调用参数，应逐条验证。
 - **[2.19 PM-3]** Phase 2 实验分析完成：3 组实验全量结果汇总。核心发现：①AV-LRM 在 kr=0.5 最差、kr=0.2 最优（排名反转），价值在跨 kr 鲁棒性 ②Baseline@64 89% OOM vs Sparse@64 零 OOM，证实稀疏化扩展帧预算 ③naive_iframe 在 kr=0.5 下与 baseline 准确率完全一致（75.93%）。PROGRESS.md 已更新。
 - **[2.19 PM-2]** 确认 3 组 Phase 2 实验命令并启动：①Naive baselines 全量 5mode×108题 ②Sparse@64 vs Baseline@64 ③Naive kr=0.2。用户按序运行中，新对话 Agent 负责结果分析。
 - **[2.19 PM]** Phase 2 P0 #1 完成：Naive baselines 代码实现。`pipeline.py` 新增 `run_naive(strategy=uniform|random|iframe_uniform)`，`eval_videomme.py` 新增 `--modes naive_uniform naive_random naive_iframe`。Smoke test 3 视频 9 题全部通过，VisTok 一致（4560）确认帧数匹配。修复 bug：strategy 映射 naive_iframe→iframe_uniform。
@@ -379,4 +363,3 @@ DISABLE_MONKEY_PATCH=1 python fasteromni/eval_videomme.py \
 - **[2.17]** PROGRESS.md 创建。eval_videomme.py 优化（实时进度 + 超时 + 增量 CSV）。pipeline.py 修复（OOM: max_frames + 音频截断）。
 - **[2.16]** Video-MME 评估 Pipeline 完成。GPT Code Review 6/8 修复。ActivityNet-QA 消融完成。
 - **[2.15]** 串行 Pipeline 跑通。首次 TTFT 对比完成。
-- **[2.20 PM]** Modality baselines 全量实验失败排查：108 题 x 4 模态全部输出 !!!!（token id 0），准确率 0%。排查过程：1)排除 conda 环境问题（base/mmlab310 均复现）2)排除 monkey patch 问题（DISABLE_MONKEY_PATCH=1 仍复现）3)发现 [2.20] 错误移除了 use_audio_in_video 参数——该参数实际是 model.generate() 的合法参数（控制 thinker 是否使用视频音轨），不仅是 processor 参数。已将 use_audio_in_video 回填到所有 4 处 generate 调用（baseline=True, sparse/naive=not skip_audio, modality=use_audio）。单次 1 视频 baseline 测试恢复正常（33.3%, pred=B），但 3 视频 x 4 模态测试仍全部 !!!!，说明 use_audio_in_video 不是充分修复。**当前状态：根因未完全定位**，可能还涉及 thinker_max_new_tokens 替换 max_new_tokens、outlier zeroing 不充分、或其他 [2.20] 改动的交互效应。待继续排查。

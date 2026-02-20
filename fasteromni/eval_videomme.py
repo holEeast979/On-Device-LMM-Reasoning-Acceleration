@@ -16,9 +16,6 @@ Usage:
 """
 from __future__ import annotations
 
-import os
-_DISABLE_MONKEY_PATCH = os.environ.get("DISABLE_MONKEY_PATCH", "0") == "1"
-
 # === Monkey-patch: 防止音频提取死锁 ===
 #
 # 死锁根因（两个独立阻塞点）：
@@ -29,31 +26,28 @@ _DISABLE_MONKEY_PATCH = os.environ.get("DISABLE_MONKEY_PATCH", "0") == "1"
 #   - 替换 librosa.load 为 subprocess+timeout 版本（兜底）
 #   - 替换 process_audio_info 为完全绕过 av.open/librosa 的安全版本（根治）
 #
-# 设置 DISABLE_MONKEY_PATCH=1 可禁用所有 patch（用于调试/smoke test）
-#
 import librosa
 import subprocess
 import numpy as np
+import os
 
 _SAFE_AUDIO_SR = 16000
 _SAFE_TIMEOUT = 30  # seconds
 
 def _safe_extract_audio(path: str, sr: int = _SAFE_AUDIO_SR,
                         offset: float = 0.0, duration: float = None) -> np.ndarray:
-    """用 subprocess ffmpeg 提取音频，带超时保护。失败返回 0.1s 静音。
-    输出 int16 → float32 / 32768，与 librosa.load 的归一化方式一致。"""
+    """用 subprocess ffmpeg 提取音频，带超时保护。失败返回 0.1s 静音。"""
     try:
         cmd = ["ffmpeg", "-y"]
         if offset > 0:
             cmd += ["-ss", str(offset)]
-        cmd += ["-i", path, "-vn", "-acodec", "pcm_s16le",
-                "-ar", str(sr), "-ac", "1", "-f", "s16le", "pipe:1"]
+        cmd += ["-i", path, "-vn", "-acodec", "pcm_f32le",
+                "-ar", str(sr), "-ac", "1", "-f", "f32le", "pipe:1"]
         if duration is not None:
             cmd += ["-t", str(duration)]
         r = subprocess.run(cmd, capture_output=True, timeout=_SAFE_TIMEOUT)
         if r.returncode == 0 and len(r.stdout) > 0:
-            audio = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
-            return audio
+            return np.frombuffer(r.stdout, dtype=np.float32)
     except subprocess.TimeoutExpired:
         print(f"[WARN] ffmpeg audio extraction timeout ({_SAFE_TIMEOUT}s) for {path}", flush=True)
     except Exception as e:
@@ -72,8 +66,7 @@ def _safe_librosa_load(path, sr=22050, mono=True, offset=0.0, duration=None, **k
         return _safe_extract_audio(path, sr=sr, offset=offset, duration=duration), sr
     return _original_librosa_load(path, sr=sr, mono=mono, offset=offset, duration=duration, **kwargs)
 
-if not _DISABLE_MONKEY_PATCH:
-    librosa.load = _safe_librosa_load
+librosa.load = _safe_librosa_load
 
 
 # 2. 替换 process_audio_info（根治：完全绕过 av.open 和 librosa.load）
@@ -125,11 +118,10 @@ def _safe_process_audio_info(conversations, use_audio_in_video):
 import qwen_omni_utils.v2_5.audio_process as _ap_mod
 import qwen_omni_utils.v2_5 as _v25_mod
 import qwen_omni_utils as _qu_mod
-if not _DISABLE_MONKEY_PATCH:
-    _ap_mod.process_audio_info = _safe_process_audio_info
-    _v25_mod.process_audio_info = _safe_process_audio_info
-    if hasattr(_qu_mod, 'process_audio_info'):
-        _qu_mod.process_audio_info = _safe_process_audio_info
+_ap_mod.process_audio_info = _safe_process_audio_info
+_v25_mod.process_audio_info = _safe_process_audio_info
+if hasattr(_qu_mod, 'process_audio_info'):
+    _qu_mod.process_audio_info = _safe_process_audio_info
 
 
 # 3. 替换 fetch_video（根治：用 ffmpeg subprocess 替代 torchvision/decord/av）
@@ -272,13 +264,10 @@ def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
 
 # 注入 fetch_video 到所有引用点
 import qwen_omni_utils.v2_5.vision_process as _vp_mod
-if not _DISABLE_MONKEY_PATCH:
-    _vp_mod.fetch_video = _safe_fetch_video
-    _v25_mod.fetch_video = _safe_fetch_video
-    if hasattr(_qu_mod, 'fetch_video'):
-        _qu_mod.fetch_video = _safe_fetch_video
-else:
-    print('[INFO] Monkey-patches DISABLED (DISABLE_MONKEY_PATCH=1)', flush=True)
+_vp_mod.fetch_video = _safe_fetch_video
+_v25_mod.fetch_video = _safe_fetch_video
+if hasattr(_qu_mod, 'fetch_video'):
+    _qu_mod.fetch_video = _safe_fetch_video
 # === End monkey-patch ===
 
 import argparse
@@ -520,13 +509,6 @@ def run_single(
                     keep_ratio=keep_ratio,
                     max_frames=max_frames,
                 )
-            elif mode in ("text_only", "audio_only", "video_only"):
-                r = pipe.run_modality_baseline(
-                    sample.video_path, prompt,
-                    modality=mode,
-                    max_new_tokens=max_new_tokens,
-                    max_frames=max_frames,
-                )
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -748,8 +730,7 @@ def main():
                         help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
                         choices=["baseline", "sparse", "sparse_no_audio",
-                                 "naive_uniform", "naive_random", "naive_iframe",
-                                 "text_only", "audio_only", "video_only"],
+                                 "naive_uniform", "naive_random", "naive_iframe"],
                         help="Modes to evaluate")
     parser.add_argument("--sweep", choices=["keep_ratio", "alpha", "none"], default="none",
                         help="Run ablation sweep")
@@ -801,10 +782,7 @@ def main():
                 incremental_csv=inc_csv,
             )
             all_records.extend(records)
-            if mode in ("baseline", "text_only", "audio_only", "video_only"):
-                label = mode
-            else:
-                label = f"{mode}(kr={args.keep_ratio})"
+            label = f"{mode}(kr={args.keep_ratio})" if mode != "baseline" else "baseline"
             summary = summarize_records(records, label=label)
             all_summaries.append(summary)
             # 每个 mode 独立保存

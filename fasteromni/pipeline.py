@@ -105,7 +105,7 @@ class PipelineResult:
     preprocess_ms: float = 0.0          # 包括 process_mm_info 或 I 帧解码
     tokenize_ms: float = 0.0            # processor tokenize
     audio_feature_ms: float = 0.0       # whisper feature extraction
-    generate_ms: float = 0.0             # model.generate() 延迟（对 Qwen2.5-Omni 用 thinker_max_new_tokens=1 近似 TTFT）
+    generate_ms: float = 0.0             # model.generate() 延迟（max_new_tokens=1 时即为 TTFT）
     total_ms: float = 0.0               # 端到端总时间
 
     # Token 统计
@@ -236,15 +236,14 @@ class SparseInferencePipeline:
                 result.total_tokens = int(ids.shape[-1])
 
             # 4. Generate
-            # 注意：Qwen2.5-Omni 的 generate() 不使用 max_new_tokens；
-            # 文本长度由 thinker_max_new_tokens 控制。
+            # 注意：generate_ms 是 model.generate() 的完整耗时
+            # 当 max_new_tokens=1 时，generate_ms 即为真正的 TTFT
             self._sync_devices()
             t0 = time.perf_counter()
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
-                    use_audio_in_video=True,
-                    thinker_max_new_tokens=max_new_tokens,
+                    max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
                 )
@@ -428,14 +427,13 @@ class SparseInferencePipeline:
                 result.total_tokens = int(ids.shape[-1])
 
             # === Step 8: Generate ===
-            # Qwen2.5-Omni: 用 thinker_max_new_tokens 控制文本长度（max_new_tokens 会被忽略）
+            # generate_ms 是完整 generate 耗时；max_new_tokens=1 时即为 TTFT
             self._sync_devices()
             t0 = time.perf_counter()
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
-                    use_audio_in_video=(not skip_audio),
-                    thinker_max_new_tokens=max_new_tokens,
+                    max_new_tokens=max_new_tokens,
                     do_sample=False,
                     return_audio=False,
                 )
@@ -659,153 +657,8 @@ class SparseInferencePipeline:
             t0 = time.perf_counter()
             with torch.no_grad():
                 output_ids = model.generate(
-                    **inputs,
-                    use_audio_in_video=(not skip_audio),
-                    thinker_max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    return_audio=False,
-                )
-            self._sync_devices()
-            result.generate_ms = (time.perf_counter() - t0) * 1000
-
-            result.output_text = proc.batch_decode(
-                output_ids[:, inputs["input_ids"].shape[1]:],
-                skip_special_tokens=True
-            )[0]
-
-        except torch.cuda.OutOfMemoryError:
-            result.error = "OOM"
-            self._clear_gpu()
-        except Exception as e:
-            result.error = repr(e) if not str(e) else str(e)
-            import traceback
-            traceback.print_exc()
-
-        result.total_ms = (time.perf_counter() - t_start) * 1000
-        self._clear_gpu()
-        return result
-
-
-    def run_modality_baseline(
-        self,
-        video_path: str,
-        question: str,
-        modality: str = "text_only",
-        max_new_tokens: int = 256,
-        max_frames: int = 32,
-    ) -> PipelineResult:
-        """
-        Modality baseline 推理：消融单一模态的贡献。
-
-        模式：
-        - text_only:  1 黑帧 + 无音频 → 语言先验下界
-        - audio_only: 1 黑帧 + 真实音频 → 音频贡献
-        - video_only: 真实视频 + 无音频 → 视觉贡献（同 sparse_no_audio 路径）
-
-        注意：
-        - video_only 和 text_only 不传音频（audio=None），
-          避免静音 Whisper 特征导致模型退化
-        - audio_only 传真实音频 + 黑帧，给模型 input_features
-        """
-        self.load_model()
-        result = PipelineResult(
-            mode=f"modality_{modality}", video_path=video_path, question=question)
-        t_start = time.perf_counter()
-
-        try:
-            from qwen_omni_utils import process_mm_info
-            import common as C
-
-            model = self._model
-            proc = self._proc
-
-            # Step 1: 提取真实视频+音频（始终 use_audio_in_video=True
-            #         走 baseline 同一条安全路径，避免死锁）
-            t0 = time.perf_counter()
-            video_ele = {"type": "video", "video": str(video_path)}
-            if max_frames > 0:
-                video_ele["nframes"] = max_frames
-            conversation = [{"role": "user", "content": [
-                video_ele, {"type": "text", "text": question}
-            ]}]
-            audios, images, videos = process_mm_info(
-                conversation, use_audio_in_video=True)
-            result.preprocess_ms = (time.perf_counter() - t0) * 1000
-
-            # Step 2: 根据 modality 选择传入 proc() 的内容
-            audios_list = list(audios) if audios else None
-
-            if modality == "text_only":
-                # 黑帧 + 无音频 → 语言先验
-                if videos and len(videos) > 0:
-                    videos = [torch.zeros_like(videos[0][:1])]
-                audios_list = None
-                use_audio = False
-                result.num_frames_input = 1
-
-            elif modality == "audio_only":
-                # 黑帧 + 真实音频 → 音频贡献
-                if videos and len(videos) > 0:
-                    videos = [torch.zeros_like(videos[0][:1])]
-                use_audio = True
-                result.num_frames_input = 1
-
-            elif modality == "video_only":
-                # 真实视频 + 无音频 → 视觉贡献
-                audios_list = None
-                use_audio = False
-                if videos and len(videos) > 0:
-                    v = videos[0]
-                    result.num_frames_input = (
-                        v.shape[0] if hasattr(v, 'shape') else len(v))
-
-            else:
-                raise ValueError(f"Unknown modality: {modality}")
-
-            # Step 3: Tokenize
-            t0 = time.perf_counter()
-            text = proc.apply_chat_template(
-                conversation, tokenize=False, add_generation_prompt=True)
-            inputs = proc(
-                text=text, videos=videos, audio=audios_list,
-                use_audio_in_video=use_audio,
-                return_tensors="pt", padding=True,
-            )
-            inputs = inputs.to(model.device)
-            result.tokenize_ms = (time.perf_counter() - t0) * 1000
-
-            # Token 统计
-            if "input_ids" in inputs:
-                from utils.profiling_utils import get_mm_token_ids_from_tokenizer
-                tok = getattr(proc, "tokenizer", proc)
-                mm = get_mm_token_ids_from_tokenizer(tok)
-                ids = inputs["input_ids"][0]
-                vision_ids = set(
-                    int(x) for x in
-                    mm.get("vision_special_token_ids", []) or [])
-                audio_ids = set(
-                    int(x) for x in
-                    mm.get("audio_special_token_ids", []) or [])
-                result.visual_tokens = (
-                    sum(int((ids == tid).sum().item())
-                        for tid in vision_ids)
-                    if vision_ids else 0)
-                result.audio_tokens = (
-                    sum(int((ids == tid).sum().item())
-                        for tid in audio_ids)
-                    if audio_ids else 0)
-                result.total_tokens = int(ids.shape[-1])
-
-            # Generate
-            self._sync_devices()
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                output_ids = model.generate(
-                    **inputs,
-                    use_audio_in_video=use_audio,
-                    thinker_max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    return_audio=False,
+                    **inputs, max_new_tokens=max_new_tokens,
+                    do_sample=False, return_audio=False,
                 )
             self._sync_devices()
             result.generate_ms = (time.perf_counter() - t0) * 1000

@@ -252,23 +252,7 @@ def load_qwen25_omni(model_dir: str, dtype: str = "bf16"):
         trust_remote_code=True,
         attn_implementation="sdpa"
     ).eval()
-
-    # Repair rare extreme outliers that appear after bf16 loading (disk file is clean).
-    # Threshold 1e10 is safe: normal params max ~416 (k_proj.bias), true corruption is ~1e36.
-    _OUTLIER_THRESH = 1e10
-    with torch.no_grad():
-        for name, p in model.thinker.named_parameters():
-            if not p.is_floating_point():
-                continue
-            mask = p.abs() > _OUTLIER_THRESH
-            if mask.any():
-                cnt = int(mask.sum().item())
-                max_abs = float(p.abs().float().max().item())
-                p[mask] = 0
-                print(f"[WARN] Zeroed {cnt} extreme outlier(s) in thinker.{name} "
-                      f"(max_abs={max_abs:.2e}). Model shard may have loading artifact.",
-                      flush=True)
-
+    
     return model, proc
 
 
@@ -343,7 +327,7 @@ def run_qwen25_omni_single(model, proc, content_list: list, question: str, max_n
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                thinker_max_new_tokens=max_new_tokens,
+                max_new_tokens=max_new_tokens,
                 do_sample=False,
                 return_audio=False,  # Disable audio output to save memory
             )
