@@ -468,6 +468,29 @@ Per-Video Bootstrap（按 video_file_id 聚合后）：
 
 **数据集位置**：`/root/autodl-tmp/data/MVBench/`（17GB，✅ 已解压就绪。11 视频子目录 + 20 JSON + 3,333 视频文件）
 
+### 数据保护约定（⚠️ 必须遵守）
+
+> **原则：已有实验数据绝不覆盖。新实验必须写入新目录。**
+
+**结果根目录**：`/root/autodl-tmp/results/fasteromni/`
+
+**已有数据目录索引**（🔒 只读，禁止覆盖）：
+
+| 目录 | 内容 | 题数 | 视频数 | 备注 |
+|------|------|:----:|:-----:|------|
+| `videomme_full/` | 6 模式 × 全量 Video-MME | 300×6 | 100 | Phase 2 主实验 |
+| `videomme_full/bootstrap_ci/` | Bootstrap CI 结果 | — | — | 10,000 次 |
+| `naive_comparison/` | Naive baselines kr=0.5 | 108×5 | 36 | Phase 2 P0#1 |
+| `naive_comparison_kr02/` | Naive baselines kr=0.2 | 108×4 | 36 | 补充实验 |
+| `sparse64/` | Sparse@64 vs Baseline@64 | 108×2 | 36 | Phase 2 P0#3 |
+| `videomme/ablation_kr_short/` | kr sweep (sparse only) | 108×6 | 36 | Phase 1 |
+
+**新实验命名规则**：
+- MVBench 实验 → `mvbench/` 或 `mvbench_<tag>/`
+- Pareto 曲线 → `pareto_videomme/` 或 `pareto_mvbench/`
+- Hybrid 策略 → `hybrid_<tag>/`
+- **绝不使用已有目录名作为 `--out-dir`**
+
 ### Phase 3（架构扩展 — 其他两大技术支柱）
 
 | # | 任务 | 说明 |
@@ -680,6 +703,7 @@ num_frames, error, pred_raw
 
 ## 变更日志
 
+- **[2.21 PM-4]** **MVBench 代码就绪 + 数据保护 + Non-inferiority prompt**：①GPT 5.3 Codex 实现 `eval_mvbench.py` 并 smoke test 通过（36题）②新增"数据保护约定"（已有数据目录索引+新实验命名规则）③Sparse@64 闭环数据分析：Sparse@64(70.4%) vs Baseline@32(75.9%) -5.6pp 但 tokens 少 54% ④GPT Task C: Non-inferiority 分析 prompt 已写好 ⑤GPT 工具分工表（5.2军师/5.3执行）⑥Hybrid策略=naive_iframe覆盖+AV-LRM预算分配，~30行代码
 - **[2.21 PM-3]** **GPT Review 完成 + MVBench 解压就绪**：①双 GPT Review（5.2/5.3 Codex）完成，结论：5.2更强（因果分析深、提出Two-Regime理论和Hybrid策略）②论文定位转型确定：从"AV-LRM准确率领先"→"资源约束下可运行性+Pareto前沿+鲁棒性" ③MVBench 解压完成（3,333视频×20任务×11子目录）④磁盘扩容60→80GB ⑤新增5项必做实验：Pareto曲线/MVBench全量/Non-inferiority/Sparse@64闭环/Hybrid策略
 - **[2.21 PM-2]** **Bootstrap CI 完成 + MVBench 下载完成**：①GPT 实现 `bootstrap_ci.py` 并实跑通过（10,000次bootstrap）②配对结果：sparse vs BL CI[-5.7,+1.4]跨零(无显著差异)，naive_iframe vs BL CI[-2.8,+4.3]跨零 ③P1#5标记完成 ④MVBench 17GB下载完成（12 zip + 20 JSON），待扩容磁盘后解压
 - **[2.21 PM]** **Benchmark 决策 + MVBench 下载**：①确定双 benchmark 方案（Video-MME Short + MVBench）②OOM 边界计算：32GB 不加 max_frames 最多 ~30s 视频 ③MVBench ~16s 不会 OOM，是稀疏化最佳测试场 ④删除 Phi-3.5-vision(7.8G) 腾空间 ⑤MVBench 下载中(17.3GB, HF) ⑥论文定位：边缘服务器/轻量部署，非手机端侧 ⑦ActivityNet-QA 正式放弃
