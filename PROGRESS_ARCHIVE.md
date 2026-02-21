@@ -1,8 +1,16 @@
-# FasterOmni 开发进度
+# FasterOmni 开发进度（完整归档）
 
-> **本文件是跨对话、跨平台的唯一进度真实来源。**
-> Windsurf 每次对话开始时读取此文件获取上下文，结束时更新此文件。
-> Obsidian Agent 关注 `待探讨问题` 和 `外部反馈` 区域。
+> **本文件用途**：
+> - **完整历史记录**：所有实验数据、变更日志、外部反馈、编码规范的完整版本
+> - **深度上下文**：当需要了解某个决策的来龙去脉时查阅（如"为什么选 Video-MME"、"[2.20] 代码污染事件详情"）
+> - **实验数据详情**：Phase 1/2 所有实验的完整数据表格（TTFT、kr 消融、Modality baselines 等）
+> - **适用对象**：需要深入了解项目历史的 Agent、写论文时需要引用具体数据、troubleshooting 时查找根因
+>
+> **日常使用**：请优先查看 `PROGRESS.md`（199 行精简版），只在需要历史细节时查阅本文件
+>
+> **GitHub 地址**：
+> - 本文件 URL: `https://raw.githubusercontent.com/holEeast979/On-Device-LMM-Reasoning-Acceleration/master/PROGRESS_ARCHIVE.md`
+> - 精简版 URL: `https://raw.githubusercontent.com/holEeast979/On-Device-LMM-Reasoning-Acceleration/master/PROGRESS.md`
 
 ---
 

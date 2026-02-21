@@ -1,7 +1,16 @@
 # FasterOmni 开发进度
 
-> **本文件是跨对话、跨平台的唯一进度真实来源。**
-> 历史细节见 `PROGRESS_ARCHIVE.md`。
+> **本文件用途**：
+> - **当前状态快照**：最新的实验进展、待做工作、核心发现
+> - **数据保护索引**：已有实验数据目录清单（禁止覆盖）
+> - **代码结构概览**：当前在用的文件和模块
+> - **适用对象**：Windsurf Agent（每次对话读取）、Jarvis（手机端监控）、用户（快速了解进度）
+>
+> **历史细节**：完整的实验数据、变更日志、外部反馈见 `PROGRESS_ARCHIVE.md`（728 行）
+>
+> **GitHub 地址**：`https://github.com/holEeast979/On-Device-LMM-Reasoning-Acceleration`
+> - PROGRESS.md: `https://raw.githubusercontent.com/holEeast979/On-Device-LMM-Reasoning-Acceleration/master/PROGRESS.md`
+> - PROGRESS_ARCHIVE.md: `https://raw.githubusercontent.com/holEeast979/On-Device-LMM-Reasoning-Acceleration/master/PROGRESS_ARCHIVE.md`
 
 ---
 
