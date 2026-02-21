@@ -15,6 +15,7 @@
 | # | 实验 | 状态 | 结果位置 |
 |---|------|------|---------|
 | P0 #1 | Naive baselines 全量对比 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison/` |
+| P0 #2 | Modality baselines (6模式×300题) | ✅ | `/root/autodl-tmp/results/fasteromni/videomme_full/` |
 | P0 #3 | Sparse@64 vs Baseline@64 | ✅ | `/root/autodl-tmp/results/fasteromni/sparse64/` |
 | 补充 | Naive kr=0.2 | ✅ | `/root/autodl-tmp/results/fasteromni/naive_comparison_kr02/` |
 
@@ -269,6 +270,33 @@ Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/
 
 **结论**：AV-LRM 的真正价值是**跨稀疏度的鲁棒性**（69-70% 稳定不变），而非在某个 kr 上碾压 naive。帧预算越紧张，智能选帧越重要。
 
+**实验 4 — Modality Baselines 全量评估（6 模式 × 300 题，all durations）**：
+
+| 模式 | Overall | Short | Medium | Long | Gen(ms) | VisTok |
+|------|---------|-------|--------|------|---------|--------|
+| text_only | **42.0%** | 40.7% | 40.0% | 45.1% | 124 | 391 |
+| audio_only | **51.3%** | 55.6% | 51.1% | 47.1% | 912 | 391 |
+| video_only | **62.2%** | 73.1% | 61.1% | 49.4% | 1,904 | 10,800 |
+| baseline | **61.9%** | 75.9% | 56.7% | 49.4% | 2,752 | 10,795 |
+| sparse(kr=0.5) | **59.0%** | 69.4% | 57.8% | 49.0% | 2,395 | 8,744 |
+| naive_iframe(kr=0.5) | **61.3%** | 75.9% | 60.0% | 47.1% | 2,403 | 8,744 |
+
+**各模态贡献量化**（相对 text_only 的增量）：
+
+| Duration | 语言先验(T) | +音频 | +视觉 | +两者(BL) | 语言先验占BL比 |
+|----------|-----------|-------|-------|-----------|:-----------:|
+| Short | 40.7% | +14.8pp | +32.4pp | +35.2pp | **54%** |
+| Medium | 40.0% | +11.1pp | +21.1pp | +16.7pp | **71%** |
+| Long | 45.1% | +2.0pp | +4.3pp | +4.3pp | **91%** |
+
+⚠️ **核心发现**：
+
+1. **语言先验显著**：text_only=42%（随机25%），证实 Video-MME 有 benchmark bias，但 sparse 在非语言先验题上仍有 43.7%（远>25%），说明 kr 不敏感不是纯语言先验
+2. **Long 视频视觉几乎无用**：baseline 仅比 text_only 高 4.3pp，91% 靠语言先验。这解释了 sparse 在 Long 上 +1.0pp（因为视觉本来就没贡献）
+3. **video_only ≥ baseline**：Overall 62.2% vs 61.9%，Medium 61.1% vs 56.7%（+4.4pp）。音频在 Medium 上可能引入干扰
+4. **LP-unsolvable 问题**（174/300）上 baseline=48.8%, sparse=43.7%, naive_iframe=47.7%——在真正需视觉的题上 AV-LRM 不如 naive_iframe
+5. **Short 配对 t-test**：sparse vs baseline t=-2.02(p≈0.05 边界)，naive_iframe vs baseline t=0.00（无差异）
+
 ---
 
 ## 关键设计决策
@@ -305,10 +333,10 @@ Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/
 | # | 优先级 | 任务 | GPT Review 级别 | 说明 | 预估 |
 |---|--------|------|-----------------|------|------|
 | 1 | **P0** | ~~**Naive baselines 对比**~~ | Critical #1 | ✅ 全量完成。kr=0.5: naive_iframe=baseline(75.9%), AV-LRM 最差(69.4%); kr=0.2: AV-LRM 最优(70.4%), 排名反转。结论：AV-LRM 价值在跨 kr 鲁棒性 | ✅ done |
-| 2 | **P0** | **Modality baselines** | Major #2 | text-only / audio-only / video-only 下界 → 确认模型吃了多少视觉信息 | ~2h |
+| 2 | **P0** | ~~**Modality baselines**~~ | Major #2 | ✅ 全量完成(6模式×300题)。text_only=42%(语言先验)，audio_only=51.3%(+9.3pp)，video_only=62.2%(+20.2pp)。Long视频91%靠语言先验。详见下方实验4 | ✅ done |
 | 3 | **P0** | ~~**Sparse@64 vs Baseline@64**~~ | Critical #3 | ✅ Baseline@64: 96/108 OOM (89%), Sparse@64: 0 OOM. 直接证明稀疏化扩展帧预算边界 | ✅ done |
-| 4 | **P0** | **音频公平性修复** | Critical #2 | baseline 也做音频截断，或明确报告音频 token 差异（实测仅 7.9%） | ~1h |
-| 5 | **P1** | **Per-video 统计** | Major #1 | 按视频为单位报告均值/方差/置信区间 + 配对检验 | ~1h |
+| 4 | **P0** | **音频公平性修复** | Critical #2 | ⚠️ video_only≥baseline(62.2% vs 61.9%)说明音频可能有干扰而非增益，音频token差异不是主要混淆源。可在论文中说明 | ~0.5h |
+| 5 | **P1** | **Per-video 统计** | Major #1 | ⚠️ 已做Short配对t-test: sparse vs BL t=-2.02(p≈0.05边界), naive_iframe vs BL t=0.00(不显著)。需补充bootstrap CI | ~0.5h |
 | 6 | **P1** | **M/L sparse 策略重设计** | — | kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | ~3h |
 | 7 | **P1** | **Content-adaptive** | — | 动态 kr（解决逐视频波动大的 tail case） | ~2h |
 | 8 | **P2** | AV-LRM 在高 GOP 场景验证 | Major #4 | 在 M/L（GOP 100+）证明打分公式优于 naive | 依赖 #6 |
@@ -523,6 +551,7 @@ num_frames, error, pred_raw
 
 ## 变更日志
 
+- **[2.21 AM]** **Modality Baselines 全量分析完成**：6模式×300题全部有效（零垃圾零空答案）。核心发现：①text_only=42%证实语言先验显著 ②Long视频91%靠语言先验（BL仅比text_only高4.3pp）③video_only≥baseline（音频可能干扰Medium）④LP-unsolvable题上naive_iframe(47.7%)优于sparse(43.7%) ⑤Short配对t-test: sparse vs BL p≈0.05边界。P0#2标记完成，P0#4和P1#5状态更新。
 - **[2.21]** **架构重构 + Modality Baselines 完成**：①pipeline.py 完成"帧选择与推理引擎解耦"重构——新增 SelectedFrames 数据类、_run_inference() 统一推理引擎（generate 从 3 处→1 处）、_frames_to_video_tensor() 和 _count_tokens() 工具方法。3 个 run_* 方法变为 select + _run_inference 薄包装。②新增 text_only / audio_only / video_only 三个 modality baseline 模式（_select_* + run_* + eval_videomme.py 分发）。③6 模式 × 1 视频 smoke test 全部通过（Err=0）。④PROGRESS.md 新增"跨模型工作流规范"和"实验输出标准"章节。⑤全量评估（6 模式 × 300 题）已启动。
 - **[2.20 PM-3]** **代码清理与架构梳理**：①将 6 个废弃 Phase 1 脚本归档到 `fasteromni/phase1_archive/`（run_ablation/run_comparison/eval_accuracy/evaluator/analyze_scoring/analyze_gop）②完成代码架构总结：当前在用文件仅 pipeline.py + eval_videomme.py + modules/ ③提出架构改进建议：帧选择与推理引擎解耦（避免重复代码和批量改动风险）④制定 Modality Test 重新规划方案 ⑤PROGRESS.md 全面更新，为新对话 Agent 提供完整交接信息。
 - **[2.20 PM-2]** **代码回退**：[2.20] 的 modality baseline 改动导致严重污染（所有模式输出 `!!!!`），已将 `pipeline.py`、`eval_videomme.py`、`common.py` 全部恢复到 `9390d91`（Phase 1 干净状态）。回退后 baseline 验证正常（3 视频 9 题 = 66.7%）。
