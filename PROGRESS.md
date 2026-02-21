@@ -41,7 +41,22 @@
 4. ⬜ **Sparse@64 闭环**：证明"更多帧 → 更好准确率"（不只是 OOM 率）
 5. ⬜ **Hybrid 策略**（GPT 5.2 提案）：naive_iframe 保覆盖 + AV-LRM 分配剩余预算
 
-**GPT Review 工具选择**：以后用 GPT 5.2（因果分析更深、实验建议更有创意、提出 Two-Regime 理论和 Hybrid 策略）
+**GPT 工具分工**：
+
+| GPT 版本 | 角色 | 适用场景 | 风格 |
+|----------|------|---------|------|
+| **GPT 5.2** | 军师（分析+决策） | Review、论文故事线、实验方案评审、负结果解释、理论构建 | 资深合作者，追问"为什么"并提出理论框架 |
+| **GPT 5.3 Codex** | 执行（写代码+工程） | 评估脚本、数据处理、Bootstrap CI、pipeline 实现等工程任务 | 高效工程师，给 checklist 快速执行 |
+
+**Review 必做事项执行计划**：
+
+| # | 任务 | 需要代码？ | 现在能跑？ | 执行方式 |
+|---|------|:--------:|:--------:|----------|
+| 1 | **Pareto 曲线**（kr 全扫） | ❌ | ✅ 现在就能跑 | `eval_videomme.py --sweep keep_ratio` 已有！跑 kr={0.1~0.8} |
+| 2 | **MVBench 全量** | ✅ 需 GPT 写 | ❌ 等代码 | Task B prompt 已就绪(`gpt_task_b_mvbench.md`) |
+| 3 | **Non-inferiority** | ⚠️ 小改动 | ✅ | 在 bootstrap_ci.py 加 δ=2-3pp 阈值 |
+| 4 | **Sparse@64 闭环** | ❌ | ✅ 现在就能跑 | 已有代码，跑 `--max-frames 64 --modes sparse`，对比 baseline@32 准确率 |
+| 5 | **Hybrid 策略** | ✅ 需设计+代码 | ❌ | pipeline.py 新增 `run_hybrid()`，GPT 5.3 Codex 实现 |
 
 ### 已完成的实验
 
