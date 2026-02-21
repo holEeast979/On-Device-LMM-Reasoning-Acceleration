@@ -8,7 +8,7 @@
 
 ## 当前阶段
 
-**Phase 2 P0 实验全部完成，进入分析和论文写作阶段。** 6 模式×300 题全量评估完成（零垃圾零空答案）。核心发现：text_only=42%证实语言先验，Long视频91%靠语言先验，naive_iframe在kr=0.5时与baseline统计无差异(2x加速零损失)。待办：补充bootstrap CI、准备GPT Review、论文框架。
+**Phase 2 Video-MME 闭环 + GPT Review 完成，进入 MVBench 接入。** 6 模式×300 题 + Bootstrap CI + 双 GPT Review（5.2/5.3）完成。**论文定位已转型**：从"AV-LRM 准确率领先" → "资源约束下可运行性 + Pareto 前沿 + 鲁棒性"。MVBench 已解压就绪（3,333 视频 × 20 任务）。待办：MVBench 评估代码 → kr 全扫 Pareto → Hybrid 策略实验。
 
 ### 关键发现与开放问题
 
@@ -21,9 +21,27 @@
 
 **开放问题**：
 1. **Medium 音频干扰**：video_only(61.1%) > baseline(56.7%)(差+4.4pp)，需进一步分析是否有统计显著性
-2. **AV-LRM 在 LP-Unsolvable 题上劣于 naive**：43.7% vs 47.7%，需解释为什么智能选帧在真正需视觉的题上反而更差
-3. **统计严谨性**：需补充 bootstrap CI，配对 t-test 已做但 p≈0.05 边界
-4. **论文故事线调整**：不能说“AV-LRM在所有kr下都最优”，而是“鲁棒性+极端稀疏下最优”
+2. **AV-LRM 在 LP-Unsolvable 题上劣于 naive**：43.7% vs 47.7%——GPT 5.2 解释：AV-LRM 牺牲覆盖度换相关性，在中等预算下覆盖更重要（见下方 Two-Regime 理论）
+3. ~~**统计严谨性**~~：✅ Bootstrap CI 已完成。GPT 5.2 建议补 video-level cluster bootstrap（同视频题目相关性问题）+ non-inferiority framing（δ=2-3pp）
+4. ~~**论文故事线调整**~~：✅ GPT Review 后已确定新方向（见下方）
+
+### GPT Review 综合结论（GPT 5.2 + 5.3 Codex 共识）
+
+> **论文定位已转型**：从"AV-LRM 准确率领先" → "资源约束下可运行性 + Pareto 前沿 + 鲁棒性贡献"
+
+**Two-Regime 理论**（GPT 5.2 独创，解释 kr=0.5 负结果）：
+- **Coverage-dominant（kr≈0.5）**：覆盖度比精确打分重要 → I-frame 天然接近场景切换，所以强
+- **Relevance-dominant（kr≤0.2）**：预算极紧，必须精准投放 → AV-LRM 占优
+- LP-Unsolvable 上 AV-LRM 劣于 naive = "覆盖不足"的直接证据 → 推动 Hybrid 策略
+
+**两个 Review 完全一致的必做事项**：
+1. ⬜ **Pareto 曲线**：kr ∈ {1.0,0.8,0.6,0.5,0.4,0.3,0.2,0.1}，报 accuracy/tokens/latency/VRAM
+2. ⬜ **MVBench 全量**：至少 baseline/sparse/naive_iframe，不加 max_frames
+3. ⬜ **Non-inferiority framing**：预设 δ=2-3pp，证明 sparse 下降不超过 δ
+4. ⬜ **Sparse@64 闭环**：证明"更多帧 → 更好准确率"（不只是 OOM 率）
+5. ⬜ **Hybrid 策略**（GPT 5.2 提案）：naive_iframe 保覆盖 + AV-LRM 分配剩余预算
+
+**GPT Review 工具选择**：以后用 GPT 5.2（因果分析更深、实验建议更有创意、提出 Two-Regime 理论和 Hybrid 策略）
 
 ### 已完成的实验
 
@@ -425,7 +443,7 @@ Per-Video Bootstrap（按 video_file_id 聚合后）：
 | Benchmark | 视频长度 | 角色 | max_frames | 状态 |
 |-----------|---------|------|:----------:|:----:|
 | **Video-MME Short** | ~60s | 主实验 A | 32（必须限制，否则 >30s OOM） | ✅ 已有数据 |
-| **MVBench** | **~16s** | **主实验 B** | **不限**（全部 <30s，无 OOM） | ✅ 已下载，待解压 |
+| **MVBench** | **~16s** | **主实验 B** | **不限**（全部 <30s，无 OOM） | ✅ 已就绪（3,333视频×20任务） |
 | Video-MME M/L | 5-60min | Supplementary | 32 | ✅ 已有数据 |
 | ~~ActivityNet-QA~~ | ~180s | ~~已放弃~~ | — | 采样 bug，不再使用 |
 
@@ -433,7 +451,7 @@ Per-Video Bootstrap（按 video_file_id 聚合后）：
 
 **MVBench 不加 max_frames 的意义**：这是稀疏化真正发挥价值的场景——16s 视频有 32 帧（2fps），sparse 可以砍到 16 帧，获得真实的 token 减少和加速，而不是被 max_frames 卡死。
 
-**数据集位置**：`/root/autodl-tmp/data/MVBench/`（17GB，✅ 已下载完成，视频为 zip 压缩包需解压。磁盘剩 3.4GB 不够解压，需先扩容）
+**数据集位置**：`/root/autodl-tmp/data/MVBench/`（17GB，✅ 已解压就绪。11 视频子目录 + 20 JSON + 3,333 视频文件）
 
 ### Phase 3（架构扩展 — 其他两大技术支柱）
 
@@ -647,6 +665,7 @@ num_frames, error, pred_raw
 
 ## 变更日志
 
+- **[2.21 PM-3]** **GPT Review 完成 + MVBench 解压就绪**：①双 GPT Review（5.2/5.3 Codex）完成，结论：5.2更强（因果分析深、提出Two-Regime理论和Hybrid策略）②论文定位转型确定：从"AV-LRM准确率领先"→"资源约束下可运行性+Pareto前沿+鲁棒性" ③MVBench 解压完成（3,333视频×20任务×11子目录）④磁盘扩容60→80GB ⑤新增5项必做实验：Pareto曲线/MVBench全量/Non-inferiority/Sparse@64闭环/Hybrid策略
 - **[2.21 PM-2]** **Bootstrap CI 完成 + MVBench 下载完成**：①GPT 实现 `bootstrap_ci.py` 并实跑通过（10,000次bootstrap）②配对结果：sparse vs BL CI[-5.7,+1.4]跨零(无显著差异)，naive_iframe vs BL CI[-2.8,+4.3]跨零 ③P1#5标记完成 ④MVBench 17GB下载完成（12 zip + 20 JSON），待扩容磁盘后解压
 - **[2.21 PM]** **Benchmark 决策 + MVBench 下载**：①确定双 benchmark 方案（Video-MME Short + MVBench）②OOM 边界计算：32GB 不加 max_frames 最多 ~30s 视频 ③MVBench ~16s 不会 OOM，是稀疏化最佳测试场 ④删除 Phi-3.5-vision(7.8G) 腾空间 ⑤MVBench 下载中(17.3GB, HF) ⑥论文定位：边缘服务器/轻量部署，非手机端侧 ⑦ActivityNet-QA 正式放弃
 - **[2.21 AM-2]** **分析深化 + 端侧文献调研 + GPT任务规格**：①回答用户5个深度问题（Long视频视觉弱因max_frames=32稀释、LP-Solvable/Unsolvable定义、音频Short有益Medium干扰、Task Type视觉依赖差异、配对t-test含义）②P0#4音频公平性标记完成（video_only≥baseline已间接回答）③端侧benchmark调研：Mobile-VideoGPT/MiniCPM-o等普遍评估10-120s视频，不评估Video-MME Long ④新增"端侧Benchmark扩展计划"（MVBench为P1优先级）⑤新增"GPT代码任务"规格（任务A: Bootstrap CI、任务B: MVBench接入）⑥相关工作新增Mobile-VideoGPT/HyperVL/MiniCPM-o
