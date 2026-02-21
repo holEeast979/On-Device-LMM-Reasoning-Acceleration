@@ -8,7 +8,22 @@
 
 ## 当前阶段
 
-**架构重构 + Modality Baselines 已完成**。pipeline.py 完成"帧选择与推理引擎解耦"重构（`model.generate` 从 3 处→1 处），并新增 text_only / audio_only / video_only 三个 modality baseline 模式。6 模式 smoke test 全部通过（Err=0）。全量评估（6 模式 × 300 题）正在运行中。
+**Phase 2 P0 实验全部完成，进入分析和论文写作阶段。** 6 模式×300 题全量评估完成（零垃圾零空答案）。核心发现：text_only=42%证实语言先验，Long视频91%靠语言先验，naive_iframe在kr=0.5时与baseline统计无差异(2x加速零损失)。待办：补充bootstrap CI、准备GPT Review、论文框架。
+
+### 关键发现与开放问题
+
+**已确认的发现**：
+1. **语言先验托底效应**：text_only=42%远高于随机25%。一定程度上弥补了稀疏化砍掉的视觉帧——很多题本来就不需要看视频
+2. **Short 是最佳优化目标**：视觉贡献+32.4pp，2x加速，naive_iframe零损失
+3. **M/L 被 max_frames=32 卡死**：sparse 的 VisTok 与 baseline 几乎相同（差<1%），稀疏化无效
+4. **AV-LRM 价值在鲁棒性**：kr=0.5最差(69.4%)，kr=0.2最优(70.4%)，帧预算越紧张智能选帧越重要
+5. **端侧设备场景匹配 Short**：文献显示端侧模型(Mobile-VideoGPT等)普遍评估 10-120s 视频，不评估 Video-MME Long(30-60min)
+
+**开放问题**：
+1. **Medium 音频干扰**：video_only(61.1%) > baseline(56.7%)(差+4.4pp)，需进一步分析是否有统计显著性
+2. **AV-LRM 在 LP-Unsolvable 题上劣于 naive**：43.7% vs 47.7%，需解释为什么智能选帧在真正需视觉的题上反而更差
+3. **统计严谨性**：需补充 bootstrap CI，配对 t-test 已做但 p≈0.05 边界
+4. **论文故事线调整**：不能说“AV-LRM在所有kr下都最优”，而是“鲁棒性+极端稀疏下最优”
 
 ### 已完成的实验
 
@@ -546,6 +561,9 @@ num_frames, error, pred_raw
 | LLaVA-PruMerge | 融合+剪枝 visual tokens | 模型内部 vs 我们预处理阶段 | 待调研 |
 | TokenPacker | 压缩 visual token sequence | token 压缩 vs 帧选择 | 待调研 |
 | VideoLLM-online | 流式视频理解 | 在线处理 vs 我们离线 | 待调研 |
+| **Mobile-VideoGPT** | 注意力关键帧打分+token剪枝，<1B参数 | 端侧部署，思路与AV-LRM类似（关键帧选择） | ✅ 已调研 |
+| HyperVL | 动态分辨率+双一致性学习 | 图像为主，视频支持有限 | 待调研 |
+| MiniCPM-o | 端侧全模态(vision+speech+streaming) | 功能更全，但未专注视觉稀疏化 | 待调研 |
 
 ---
 
