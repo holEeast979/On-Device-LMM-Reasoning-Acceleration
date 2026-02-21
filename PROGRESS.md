@@ -350,12 +350,58 @@ Video-MME 是多模态视频理解的主流 benchmark，选择题格式（A/B/C/
 | 1 | **P0** | ~~**Naive baselines 对比**~~ | Critical #1 | ✅ 全量完成。kr=0.5: naive_iframe=baseline(75.9%), AV-LRM 最差(69.4%); kr=0.2: AV-LRM 最优(70.4%), 排名反转。结论：AV-LRM 价值在跨 kr 鲁棒性 | ✅ done |
 | 2 | **P0** | ~~**Modality baselines**~~ | Major #2 | ✅ 全量完成(6模式×300题)。text_only=42%(语言先验)，audio_only=51.3%(+9.3pp)，video_only=62.2%(+20.2pp)。Long视频91%靠语言先验。详见下方实验4 | ✅ done |
 | 3 | **P0** | ~~**Sparse@64 vs Baseline@64**~~ | Critical #3 | ✅ Baseline@64: 96/108 OOM (89%), Sparse@64: 0 OOM. 直接证明稀疏化扩展帧预算边界 | ✅ done |
-| 4 | **P0** | **音频公平性修复** | Critical #2 | ⚠️ video_only≥baseline(62.2% vs 61.9%)说明音频可能有干扰而非增益，音频token差异不是主要混淆源。可在论文中说明 | ~0.5h |
-| 5 | **P1** | **Per-video 统计** | Major #1 | ⚠️ 已做Short配对t-test: sparse vs BL t=-2.02(p≈0.05边界), naive_iframe vs BL t=0.00(不显著)。需补充bootstrap CI | ~0.5h |
+| 4 | **P0** | ~~**音频公平性修复**~~ | Critical #2 | ✅ **已由 video_only 实验间接回答**。video_only(62.2%)≥baseline(61.9%)，说明去掉全部音频都不影响准确率，sparse的音频token差异(7.9%)不构成混淆变量。论文加一句说明即可，不需新实验 | ✅ done |
+| 5 | **P1** | **Per-video 统计 + Bootstrap CI** | Major #1 | ⚠️ 已做配对t-test。需GPT写bootstrap CI代码（方案见下方“GPT代码任务”） | ~0.5h |
 | 6 | **P1** | **M/L sparse 策略重设计** | — | kr 直接控制帧数 / GOP 内选帧 / max_tokens 替代 max_frames | ~3h |
 | 7 | **P1** | **Content-adaptive** | — | 动态 kr（解决逐视频波动大的 tail case） | ~2h |
 | 8 | **P2** | AV-LRM 在高 GOP 场景验证 | Major #4 | 在 M/L（GOP 100+）证明打分公式优于 naive | 依赖 #6 |
 | 9 | **P2** | 论文表格 + Pareto 曲线图 | — | 全部补充实验完成后生成 | ~1h |
+| 10 | **P1** | **MVBench 评估** | — | 端侧论文必评benchmark，视频~16s，稀疏化效果最佳区间。需GPT写接入代码 | ~3h |
+
+### GPT 代码任务（交给 GPT-Codex 实现）
+
+#### 任务 A：Bootstrap CI 脚本（P1 #5）
+
+**目标**：对已有 CSV 数据计算 bootstrap 95% 置信区间，支持 per-video 聚合和配对检验。
+
+**输入**：`/root/autodl-tmp/results/fasteromni/videomme_full/*/` 下的 `*_details.csv`
+
+**输出**：
+1. 每个 mode × duration 的 accuracy 95% CI（bootstrap 10,000 次）
+2. 配对 bootstrap：sparse vs baseline、naive_iframe vs baseline 的 accuracy 差异 CI
+3. Per-video 聚合后的均值/标准差/95% CI
+4. 汇总表格（CSV + 终端打印）
+
+**技术要求**：
+- 用 `numpy` 有放回随机采样，不依赖 scipy
+- Per-video 聚合：按 `video_file_id` 分组 → 每视频 accuracy → 对视频级 accuracy 做 bootstrap
+- 配对 bootstrap：对每个 bootstrap 样本同时采样两个 mode 的相同题目，计算 accuracy 差
+- 输出格式遵循"实验输出标准"
+
+#### 任务 B：MVBench 评估接入（P1 #10，后续）
+
+**目标**：将 MVBench 接入现有 `eval_videomme.py` 框架，复用 `pipeline.py` 的所有 mode。
+
+**背景**：MVBench 是端侧论文必评 benchmark（Mobile-VideoGPT 等），视频平均 ~16s（20 类任务），正好是稀疏化效果最佳区间。
+
+**参考**：
+- MVBench 官方：`https://github.com/OpenBMB/VideoChat2`
+- Mobile-VideoGPT 评估代码：`https://github.com/Amshaker/Mobile-VideoGPT`
+
+### 端侧 Benchmark 扩展计划
+
+> 文献调研显示，端侧论文（Mobile-VideoGPT、MiniCPM-o、HyperVL）普遍评估以下 benchmark。Video-MME Long（30-60min）不在端侧评估范围内。
+
+| Benchmark | 视频长度 | 题型 | 优先级 | 说明 |
+|-----------|---------|------|:------:|------|
+| **Video-MME Short** | ~60s | 多选 | ✅ 已有 | 当前主实验 |
+| **MVBench** | ~16s | 20类多选 | **P1** | 端侧必评，稀疏化最佳区间 |
+| EgoSchema | 180s | 5选1 | P2 | 长视频理解，样本量大(5000) |
+| NextQA | ~44s | 因果/时序QA | P2 | 短视频，接入成本低 |
+| PerceptionTest | ~23s | 感知+推理 | P2 | 短视频，Google 出品 |
+| ActivityNet-QA | ~180s | 开放QA+GPT-judge | P3 | 已做过，但采样有问题(见已知问题) |
+
+**Video-MME Medium/Long 的定位**：仅作为"探索性分析"报告，不作为核心贡献。论文中说明端侧设备不适合处理 30-60 分钟视频（VRAM 限制 + 非典型使用场景），但报告数据供 completeness。
 
 ### Phase 3（架构扩展 — 其他两大技术支柱）
 
@@ -569,6 +615,7 @@ num_frames, error, pred_raw
 
 ## 变更日志
 
+- **[2.21 AM-2]** **分析深化 + 端侧文献调研 + GPT任务规格**：①回答用户5个深度问题（Long视频视觉弱因max_frames=32稀释、LP-Solvable/Unsolvable定义、音频Short有益Medium干扰、Task Type视觉依赖差异、配对t-test含义）②P0#4音频公平性标记完成（video_only≥baseline已间接回答）③端侧benchmark调研：Mobile-VideoGPT/MiniCPM-o等普遍评估10-120s视频，不评估Video-MME Long ④新增"端侧Benchmark扩展计划"（MVBench为P1优先级）⑤新增"GPT代码任务"规格（任务A: Bootstrap CI、任务B: MVBench接入）⑥相关工作新增Mobile-VideoGPT/HyperVL/MiniCPM-o
 - **[2.21 AM]** **Modality Baselines 全量分析完成**：6模式×300题全部有效（零垃圾零空答案）。核心发现：①text_only=42%证实语言先验显著 ②Long视频91%靠语言先验（BL仅比text_only高4.3pp）③video_only≥baseline（音频可能干扰Medium）④LP-unsolvable题上naive_iframe(47.7%)优于sparse(43.7%) ⑤Short配对t-test: sparse vs BL p≈0.05边界。P0#2标记完成，P0#4和P1#5状态更新。
 - **[2.21]** **架构重构 + Modality Baselines 完成**：①pipeline.py 完成"帧选择与推理引擎解耦"重构——新增 SelectedFrames 数据类、_run_inference() 统一推理引擎（generate 从 3 处→1 处）、_frames_to_video_tensor() 和 _count_tokens() 工具方法。3 个 run_* 方法变为 select + _run_inference 薄包装。②新增 text_only / audio_only / video_only 三个 modality baseline 模式（_select_* + run_* + eval_videomme.py 分发）。③6 模式 × 1 视频 smoke test 全部通过（Err=0）。④PROGRESS.md 新增"跨模型工作流规范"和"实验输出标准"章节。⑤全量评估（6 模式 × 300 题）已启动。
 - **[2.20 PM-3]** **代码清理与架构梳理**：①将 6 个废弃 Phase 1 脚本归档到 `fasteromni/phase1_archive/`（run_ablation/run_comparison/eval_accuracy/evaluator/analyze_scoring/analyze_gop）②完成代码架构总结：当前在用文件仅 pipeline.py + eval_videomme.py + modules/ ③提出架构改进建议：帧选择与推理引擎解耦（避免重复代码和批量改动风险）④制定 Modality Test 重新规划方案 ⑤PROGRESS.md 全面更新，为新对话 Agent 提供完整交接信息。
