@@ -119,6 +119,8 @@ class PipelineResult:
     selected_gops: int = 0
     total_frames: int = 0
     keep_ratio_actual: float = 0.0
+    kr_requested: float = 0.0
+    kr_adaptive: float = 0.0
 
     # 错误
     error: Optional[str] = None
@@ -354,7 +356,13 @@ class SparseInferencePipeline:
         t0 = time.perf_counter()
         scored_gops = score_gops(gop_analysis.gops, audio_energies,
                                  alpha=alpha, min_gop_frames=min_gop_frames)
-        scored_gops = select_gops(scored_gops, keep_ratio=keep_ratio,
+        valid_gops_list = [sg for sg in scored_gops if sg.combined_score >= 0]
+        n_valid = len(valid_gops_list)
+        if max_frames > 0 and n_valid > 0:
+            kr_adaptive = min(keep_ratio, max_frames / n_valid)
+        else:
+            kr_adaptive = keep_ratio
+        scored_gops = select_gops(scored_gops, keep_ratio=kr_adaptive,
                                   variance_threshold=variance_threshold)
         scoring_ms = (time.perf_counter() - t0) * 1000
 
@@ -382,11 +390,13 @@ class SparseInferencePipeline:
             "selected_gops": selected_gops,
             "total_frames": total_frames,
             "keep_ratio_actual": keep_ratio_actual,
+            "kr_requested": keep_ratio,
+            "kr_adaptive": kr_adaptive,
+            "adaptive_triggered": kr_adaptive < keep_ratio,
         }
 
         # 当只有 1 个有效 GOP 时，音频与 1 帧视频在 processor 中可能无法对齐
         # 自动跳过音频，避免 Qwen2.5-Omni processor 的 StopIteration
-        valid_gops_list = [sg for sg in scored_gops if sg.combined_score >= 0]
         if len(valid_gops_list) <= 1:
             skip_audio = True
 
@@ -459,11 +469,16 @@ class SparseInferencePipeline:
         total_frames = gop_analysis.total_frames
 
         valid_gops = [g for g in gop_analysis.gops if g.num_frames >= 10]
-        K = max(1, math.ceil(len(valid_gops) * keep_ratio))
+        n_valid = len(valid_gops)
+        if max_frames > 0 and n_valid > 0:
+            kr_adaptive = min(keep_ratio, max_frames / n_valid)
+        else:
+            kr_adaptive = keep_ratio
+        K = max(1, math.ceil(n_valid * kr_adaptive))
         if max_frames > 0:
             K = min(K, max_frames)
         selected_gops = K
-        keep_ratio_actual = (K / len(valid_gops) if valid_gops else 0)
+        keep_ratio_actual = (K / n_valid if n_valid else 0)
 
         # === Step 2: 帧选择（策略相关）===
         audio_max_end = None
@@ -523,6 +538,9 @@ class SparseInferencePipeline:
             "selected_gops": selected_gops,
             "total_frames": total_frames,
             "keep_ratio_actual": keep_ratio_actual,
+            "kr_requested": keep_ratio,
+            "kr_adaptive": kr_adaptive,
+            "adaptive_triggered": kr_adaptive < keep_ratio,
         }
         if not frames_pil:
             preprocess_ms = gop_parse_ms + i_frame_decode_ms
@@ -735,6 +753,8 @@ class SparseInferencePipeline:
             result.total_gops = int(selected.metadata.get("total_gops", 0))
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
+            result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
+            result.kr_adaptive = float(selected.metadata.get("kr_adaptive", 0.0))
             result.preprocess_ms = selected.preprocess_ms
             result.num_frames_input = selected.num_frames_input
 
@@ -802,6 +822,8 @@ class SparseInferencePipeline:
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
             result.total_frames = int(selected.metadata.get("total_frames", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
+            result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
+            result.kr_adaptive = float(selected.metadata.get("kr_adaptive", 0.0))
             result.preprocess_ms = selected.preprocess_ms
             result.num_frames_input = selected.num_frames_input
 
