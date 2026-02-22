@@ -14,12 +14,12 @@
 
 ---
 
-## 当前状态（2.21 PM）
+## 当前状态（2.22 AM）
 
-**补充实验阶段**：稀疏化 Pipeline 已完成，正在补实验数据提高置信度。
+**补充实验全部完成**，进入论文写作阶段。
 
-- 🔄 **MVBench 全量**正在 tmux `eval` 中运行（baseline 进行中，3 mode × 3600 题，~4h）
-- 🔄 **Pareto 补数据**排队中（naive_iframe kr sweep，~1.5h）
+- ✅ **MVBench 全量** 完成（3 mode × 3600 题）— baseline 66.9%, sparse 57.4%, naive_iframe 57.8%
+- ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 与 Baseline 持平（75.93%）**
 - ✅ **Non-inferiority** 已完成（naive_iframe δ=3pp PASS）
 - ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI）
 
@@ -45,19 +45,42 @@
 
 | 发现 | 数据支撑 |
 |------|---------|
-| **naive_iframe 砍 54% tokens 几乎不掉点** | Non-inferiority δ=3pp PASS（ci_lower=-2.1pp > -3pp） |
-| **AV-LRM 价值在低预算鲁棒性** | kr=0.5 最差(69.4%), kr=0.2 最优(70.4%)，排名反转 |
-| **准确率对 kr 不敏感** | 68.5%~70.4% 范围内波动 |
+| **naive_iframe kr=0.5 零损失** | Video-MME Short: 75.93% = Baseline 75.93%，tokens 减 54%，2.1x 加速 |
+| **Pareto 曲线非单调** | kr=0.5 是峰值，kr=0.7/0.9 反而下降 → 存在最优稀疏度 |
+| **naive_iframe 在 kr=0.5 碾压 sparse** | 75.93% vs 69.44%（+6.49pp），覆盖度 > 精准打分 |
+| **sparse 仅在极低预算占优** | kr=0.2: sparse 70.37% vs naive 68.52%（+1.85pp） |
+| **MVBench 短视频不兼容** | 7/18 任务类别完全失败（视频仅 3-6 帧，GOP 解析退化） |
+| **MVBench 兼容任务掉 ~6pp** | baseline 63.8% → naive 57.8%，但 3.9x 加速 + 83% token 减少 |
 | **音频兜底效应很小** | 去音频仅多降 1.8pp，作为 free lunch 保留 |
 | **Baseline@64 不可用** | 89% OOM，Sparse@64 零 OOM |
-| **Short 是主战场** | 2x 加速 -5.6pp；M/L 因 max_frames=32 稀疏化无效 |
 | **语言先验显著** | text_only=42%（远 > 随机 25%），Long 视频 91% 靠语言 |
 
-### Two-Regime 理论（GPT 5.2）
+### Two-Regime 理论（已量化验证）
 
-- **Coverage-dominant（kr≈0.5）**：覆盖度 > 精准打分 → naive_iframe 强
-- **Relevance-dominant（kr≤0.2）**：预算极紧 → AV-LRM 精准投放占优
+- **Coverage-dominant（kr≈0.5）**：naive_iframe 75.93% vs sparse 69.44%（**+6.49pp**）
+- **Relevance-dominant（kr≤0.2）**：sparse 70.37% vs naive 68.52%（+1.85pp）
+- **交叉点在 kr≈0.3**：两种方法持平（69.44%）
 - 这解释了为什么 kr=0.5 时 AV-LRM 最差、kr=0.2 时最优
+
+### Pareto 曲线（naive_iframe × Video-MME Short）
+
+| kr | Accuracy | vs Baseline | Visual Tokens | Speedup |
+|----|----------|-------------|---------------|--------|
+| 0.2 | 68.52% | -7.41pp | 2192 (20%) | 3.6x |
+| 0.3 | 69.44% | -6.49pp | 3190 (30%) | 2.8x |
+| **0.5** | **75.93%** | **0.00pp** | 4939 (46%) | **2.1x** |
+| 0.7 | 71.30% | -4.63pp | 6658 (62%) | 1.6x |
+| 0.9 | 70.37% | -5.56pp | 7794 (73%) | 1.4x |
+
+### MVBench 全量结果
+
+| Mode | Valid/Total | Accuracy | Generate ms | Visual Tokens |
+|------|-----------|----------|------------|---------------|
+| baseline | 3318/3600 | 66.94% | 1032ms | 5570 |
+| sparse(0.5) | 2099/3600 | 57.36% | 261ms | 944 |
+| naive_iframe | 2099/3600 | 57.79% | 263ms | 944 |
+
+> ⚠️ 1501 errors = 7 个超短视频任务类别完全失败（视频仅 3-6 帧）
 
 ### 音频角色
 
@@ -74,11 +97,12 @@
 
 | # | 任务 | 状态 | 说明 |
 |---|------|:----:|------|
-| 1 | **MVBench 全量** | 🔄 运行中 | 3 mode × 3600 题，第二个 benchmark |
-| 2 | **Pareto naive_iframe kr sweep** | 🔄 排队 | 5 个 kr × Video-MME Short 108 题 |
+| 1 | **MVBench 全量** | ✅ 完成 | baseline 66.9%, naive 57.8%, 3.9x 加速 |
+| 2 | **Pareto naive_iframe kr sweep** | ✅ 完成 | kr=0.5 零损失（75.93%=BL），2.1x 加速 |
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
-| 4 | **Sparse@64 闭环** | ✅ 数据已有 | 70.4% vs BL@32 75.9%，tokens 少 54% |
-| 5 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算，~30 行 |
+| 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
+| 5 | **MVBench 短视频问题调查** | ⬜ 待查 | 7/18 任务失败，需确认是 GOP 解析还是其他原因 |
+| 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
 ### Phase 3（架构扩展）
 
@@ -93,9 +117,9 @@
 
 | # | 任务 | 依赖 |
 |---|------|------|
-| 10 | Pareto 曲线图 | #2 完成 |
-| 11 | MVBench 结果表 | #1 完成 |
-| 12 | 论文初稿 | 全部实验 |
+| 10 | Pareto 曲线图 | ✅ 数据就绪，待画图 |
+| 11 | MVBench 结果表 | ✅ 数据就绪，待整理 |
+| 12 | 论文初稿 | 核心实验全部完成 |
 
 ---
 
@@ -135,8 +159,8 @@ run_all_experiments.sh   # 一键实验脚本
 | `naive_comparison_kr02/` | Naive baselines kr=0.2（108×4 题） | 🔒 |
 | `sparse64/` | Sparse@64 vs Baseline@64（108×2 题） | 🔒 |
 | `videomme/ablation_kr_short/` | kr sweep sparse only（108×6 题） | 🔒 |
-| `mvbench/` | MVBench 全量（🔄 运行中） | 新 |
-| `pareto_naive_iframe/` | Pareto 补数据（🔄 排队） | 新 |
+| `mvbench/` | MVBench 全量（3 mode × 3600 题） | 🔒 |
+| `pareto_naive_iframe/` | naive_iframe kr sweep（5 kr × 108 题） | 🔒 |
 
 **数据集位置**：
 - Video-MME: `/root/autodl-tmp/data/Video-MME/`
@@ -186,14 +210,16 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 待探讨问题（供 Agent 讨论）
 
+- [ ] **MVBench 短视频 41.7% 失败率**：7/18 任务类别（视频 3-6 帧）完全失败，是 GOP 解析问题还是帧数不足？
+- [ ] **Pareto 非单调**：kr=0.5 是峰值，kr>0.5 反而下降 → 冗余帧引入噪声？论文如何解释？
 - [ ] **Medium 音频干扰**：video_only > baseline (+4.4pp)，统计显著性待验证
-- [ ] **Short 逐视频波动大**：部分视频准确率暴跌 66pp，Content-adaptive kr 能否解决？
 - [ ] **M/L sparse 无效**：max_frames=32 卡死，需要帧级选择或提高 max_frames
 
 ---
 
 ## 变更日志
 
+- **[2.22 AM]** MVBench 全量 + Pareto naive_iframe kr sweep 完成。核心发现：kr=0.5 零损失（=BL 75.93%），MVBench 短视频 7 任务失败
 - **[2.21 PM-5]** Non-inferiority 代码验证+commit。PROGRESS.md 精简（728行→~200行），历史归档到 PROGRESS_ARCHIVE.md
 - **[2.21 PM-4]** MVBench 代码就绪+数据保护约定+Non-inferiority prompt。Sparse@64 闭环分析完成
 - **[2.21 PM-3]** GPT Review 完成+MVBench 解压。论文定位转型确定
