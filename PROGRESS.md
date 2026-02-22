@@ -343,8 +343,38 @@ run_all_experiments.sh   # 一键实验脚本
 
 ---
 
+### M/L 视频 Adaptive kr 方案（2.22 晚讨论）
+
+**问题**：中长视频 I 帧数量多，固定 kr 稀疏化后帧数仍超过 max_frames=32，被 processor 均匀截断，稀疏化策略被覆盖，等于白做。
+
+**核心解法：Adaptive kr**
+- 公式：`kr = min(kr_base, max_frames / n_iframes)`
+- 效果：保证稀疏化输出 ≤ max_frames，不触发二次截断
+- 选帧控制权留在稀疏化策略手里（AV-LRM / naive I 帧），不被 processor 均匀采样覆盖
+
+**两层动态 kr**：
+1. **基于 max_frames 的 adaptive kr**（必做）：解决 M/L 截断问题，实现简单效果直接
+2. **基于视频内容/Task Type 的 adaptive kr**（学术亮点）：运动剧烈视频需要更多帧（低 kr 丢关键动作），对话类视频帧冗余大（高 kr 也没事）
+
+**与显存优化的配合**：显存优化提高 max_frames 上限（32→64+），adaptive kr 自动适配新上限，M/L 视频保留更多高分帧。两者联合：上限更高 + 分配更智能。
+
+### 项目定位更新（2.22 晚讨论）
+
+**定位微调**：面向 HuggingFace Transformers 原生推理栈的 training-free 视频 token 稀疏化框架，适用于资源受限设备（消费级 GPU / 边缘服务器）
+
+**关键特性**：
+- **插件式优化**：不动模型源码，纯预处理层插入，monkey-patch only
+- **即插即用**：目标封装为 Python 包，pip install 开箱即用
+- **受众广**：HF Transformers 是开源 LMM 事实标准，几乎所有开源视频模型都走这套栈
+- **与 CoPE 的区分**：CoPE 需要改架构+重新训练，我们不动模型走部署路线
+
+**目标硬件**：消费级 GPU（RTX 3090/4090/5090）、边缘服务器，不局限于纯端侧设备
+
+---
+
 ## 变更日志
 
+- **[2.22 晚-2]** M/L 视频 Adaptive kr 方案讨论完成 + 项目定位更新为 HF 原生栈 training-free 插件式优化
 - **[2.22 晚]** 论文故事线讨论完成（Jarvis + East Hole）。核心定位：training-free codec-aware 端侧加速。CoPE-VideoLM 差异化明确
 - **[2.22 午后-2]** Pareto 非单调根因分析完成（max_frames 截断+I 帧时间聚类）。Phase 3 架构规划完成。手机讨论方向整理
 - **[2.22 午后]** Sanity Check 通过（86.1%一致率+token减54%+8题翻转对称抵消）。pipeline 无 bug，kr=0.5 零损失确认为真实现象。GPT Review concern 全部关闭。MVBench 重跑中
