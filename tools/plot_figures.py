@@ -54,159 +54,94 @@ def _annotate_kr(
 
 
 def plot_pareto_curve() -> None:
-    pareto_data = {
-        "kr": [0.2, 0.3, 0.5, 0.7, 0.9],
-        "accuracy": [68.52, 69.44, 75.93, 71.30, 70.37],
-        "visual_tokens": [2192, 3190, 4939, 6658, 7794],
-        "speedup": [3.6, 2.8, 2.1, 1.6, 1.4],
-    }
-    baseline_accuracy = 75.93
-    baseline_visual_tokens = 10692
-    sparse_data = {
-        "kr": [0.2, 0.3, 0.5, 0.7, 0.9],
-        "accuracy": [70.37, 69.44, 69.44, 62.04, 64.81],
-        "visual_tokens": [2259, 3299, 5041, 6735, 7824],
-    }
+    # ── data ──
+    kr_vals = [0.2, 0.3, 0.5, 0.7, 0.9]
+    naive_acc = [68.52, 69.44, 75.93, 71.30, 70.37]
+    naive_tok = [2192, 3190, 4939, 6658, 7794]
+    naive_spd = [3.6, 2.8, 2.1, 1.6, 1.4]
+    sparse_acc = [70.37, 69.44, 69.44, 62.04, 64.81]
+    sparse_tok = [2259, 3299, 5041, 6735, 7824]
+    baseline_acc = 75.93
 
-    kr = np.array(pareto_data["kr"])
-    acc = np.array(pareto_data["accuracy"])
-    tokens = np.array(pareto_data["visual_tokens"])
-    speed = np.array(pareto_data["speedup"])
-    sparse_acc = np.array(sparse_data["accuracy"])
-    sparse_tokens = np.array(sparse_data["visual_tokens"])
+    bbox_white = dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85)
 
-    token_sort_idx = np.argsort(-tokens)
-    speed_sort_idx = np.argsort(speed)
-    sparse_token_sort_idx = np.argsort(-sparse_tokens)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    # ── helper: plot one subplot ──
+    def _plot_one(ax, naive_x, sparse_x, xlabel, title, kr05_text):
+        # curves
+        ax.plot(naive_x, naive_acc, "o-", color="#1f77b4", lw=2.2,
+                ms=8, label="naive_iframe", zorder=3)
+        ax.plot(sparse_x, sparse_acc, "^--", color="#d62728", lw=2.0,
+                ms=7, label="sparse", zorder=3)
+        ax.axhline(y=baseline_acc, color="gray", ls="--", lw=1.5,
+                   label=f"Baseline {baseline_acc}%", zorder=1)
 
-    ax1.plot(
-        tokens[token_sort_idx],
-        acc[token_sort_idx],
-        color="#1f77b4",
-        marker="o",
-        linestyle="-",
-        linewidth=2.0,
-        label="naive_iframe",
-    )
-    ax1.plot(
-        sparse_tokens[sparse_token_sort_idx],
-        sparse_acc[sparse_token_sort_idx],
-        color="#d62728",
-        marker="^",
-        linestyle="--",
-        linewidth=2.0,
-        label="sparse",
-    )
-    ax1.axhline(
-        y=baseline_accuracy,
-        color="gray",
-        linestyle="--",
-        linewidth=1.5,
-        label="Baseline 75.93%",
-    )
-    # kr label offsets to avoid overlap (tokens axis, inverted)
-    token_kr_offsets = {
-        0.9: (-40, -14),  # bottom-left of point
-        0.7: (-40, 8),    # top-left
-        0.5: (0, 0),      # skip – bold annotation below
-        0.3: (6, 8),      # top-right (avoid -54% tokens label)
-        0.2: (6, -14),    # bottom-right
-    }
-    _annotate_kr(ax1, tokens[token_sort_idx], acc[token_sort_idx],
-                 kr[token_sort_idx].tolist(), offsets=token_kr_offsets)
+        # kr labels – place each one manually with white bbox
+        # positions: (data_x, data_y) → (text offset dx, dy in points)
+        offsets_map = {
+            0.2: (0, -18),
+            0.3: (0, 10),
+            0.5: None,      # special handling below
+            0.7: (0, 10),
+            0.9: (0, -18),
+        }
+        for i, kv in enumerate(kr_vals):
+            ofs = offsets_map[kv]
+            if ofs is None:
+                continue
+            ax.annotate(
+                f"kr={kv}", (naive_x[i], naive_acc[i]),
+                textcoords="offset points", xytext=ofs,
+                fontsize=8.5, ha="center", va="center",
+                bbox=bbox_white, zorder=6,
+            )
 
-    idx_05 = int(np.where(np.isclose(kr, 0.5))[0][0])
-    ax1.scatter(
-        [tokens[idx_05]],
-        [acc[idx_05]],
-        s=170,
-        facecolor="#1f77b4",
-        edgecolor="black",
-        linewidth=1.2,
-        zorder=5,
-    )
-    token_reduction = (1.0 - tokens[idx_05] / baseline_visual_tokens) * 100.0
-    ax1.annotate(
-        f"kr=0.5\nzero-loss, −{token_reduction:.0f}% tokens",
-        (tokens[idx_05], acc[idx_05]),
-        textcoords="offset points",
-        xytext=(-20, -35),
-        fontsize=9,
-        fontweight="bold",
-        color="#1f77b4",
-        ha="center",
-    )
+        # highlight kr=0.5
+        i05 = kr_vals.index(0.5)
+        ax.scatter([naive_x[i05]], [naive_acc[i05]], s=200,
+                   fc="#1f77b4", ec="black", lw=1.5, zorder=7)
+        ax.annotate(
+            f"kr=0.5\n{kr05_text}",
+            (naive_x[i05], naive_acc[i05]),
+            textcoords="offset points", xytext=(0, -32),
+            fontsize=9.5, fontweight="bold", color="#1f77b4",
+            ha="center", va="top",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#1f77b4",
+                      alpha=0.95, lw=1.2),
+            zorder=8,
+        )
 
-    ax1.set_title("Accuracy vs Visual Tokens")
-    ax1.set_xlabel("Visual Tokens")
-    ax1.set_ylabel("Accuracy (%)")
+        ax.set_title(title, fontsize=14, pad=10)
+        ax.set_xlabel(xlabel, fontsize=12)
+
+    # ── left: Accuracy vs Visual Tokens ──
+    _plot_one(ax1, naive_tok, sparse_tok,
+              "Visual Tokens", "Accuracy vs Visual Tokens",
+              "zero-loss, −54% tokens")
+    ax1.set_ylabel("Accuracy (%)", fontsize=12)
     ax1.invert_xaxis()
-    ax1.legend(loc="lower left", frameon=True, framealpha=0.9, borderpad=0.8)
 
-    ax2.plot(
-        speed[speed_sort_idx],
-        acc[speed_sort_idx],
-        color="#1f77b4",
-        marker="o",
-        linestyle="-",
-        linewidth=2.0,
-        label="naive_iframe",
-    )
-    ax2.plot(
-        speed[speed_sort_idx],
-        sparse_acc[speed_sort_idx],
-        color="#d62728",
-        marker="^",
-        linestyle="--",
-        linewidth=2.0,
-        label="sparse",
-    )
-    ax2.axhline(
-        y=baseline_accuracy,
-        color="gray",
-        linestyle="--",
-        linewidth=1.5,
-        label="Baseline 75.93%",
-    )
-    # kr label offsets for speedup axis
-    speed_kr_offsets = {
-        0.9: (6, -14),
-        0.7: (6, 8),
-        0.5: (0, 0),      # handled separately
-        0.3: (6, -14),
-        0.2: (6, 8),
-    }
-    _annotate_kr(ax2, speed[speed_sort_idx], acc[speed_sort_idx],
-                 kr[speed_sort_idx].tolist(), offsets=speed_kr_offsets)
-    ax2.scatter(
-        [speed[idx_05]],
-        [acc[idx_05]],
-        s=170,
-        facecolor="#1f77b4",
-        edgecolor="black",
-        linewidth=1.2,
-        zorder=5,
-    )
-    ax2.annotate(
-        "kr=0.5\n2.1× faster, zero-loss",
-        (speed[idx_05], acc[idx_05]),
-        textcoords="offset points",
-        xytext=(-20, -35),
-        fontsize=9,
-        fontweight="bold",
-        color="#1f77b4",
-        ha="center",
-    )
-    ax2.set_title("Accuracy vs Speedup")
-    ax2.set_xlabel("Speedup (x)")
-    ax2.legend(loc="lower left", frameon=True, framealpha=0.9, borderpad=0.8)
+    # ── right: Accuracy vs Speedup ──
+    _plot_one(ax2, naive_spd, [naive_spd[i] for i in range(5)],
+              "Speedup (×)", "Accuracy vs Speedup",
+              "2.1× faster, zero-loss")
+    # sparse uses same speedup proxy (kr order)
+    ax2.lines[1].set_xdata(naive_spd)
+    ax2.lines[1].set_ydata(sparse_acc)
 
+    # ── shared settings ──
     for ax in (ax1, ax2):
-        ax.set_ylim(60, 78)
+        ax.set_ylim(59, 79)
+        ax.tick_params(labelsize=11)
 
-    fig.tight_layout()
+    # legend: outside plot, centered at top
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3,
+               frameon=True, framealpha=0.95, fontsize=11,
+               bbox_to_anchor=(0.5, 1.02))
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(os.path.join(OUTPUT_DIR, "pareto_curve.png"), bbox_inches="tight")
     fig.savefig(os.path.join(OUTPUT_DIR, "pareto_curve.pdf"), bbox_inches="tight")
     plt.close(fig)
