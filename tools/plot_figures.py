@@ -80,11 +80,11 @@ def plot_pareto_curve() -> None:
         # kr labels – place each one manually with white bbox
         # positions: (data_x, data_y) → (text offset dx, dy in points)
         offsets_map = {
-            0.2: (0, -18),
-            0.3: (0, 10),
-            0.5: None,      # special handling below
-            0.7: (0, 10),
-            0.9: (0, -18),
+            0.2: (0, -20),
+            0.3: (0, 22),    # far above – avoid covering sparse triangle
+            0.5: None,        # special handling below
+            0.7: (0, 14),
+            0.9: (0, -20),
         }
         for i, kv in enumerate(kr_vals):
             ofs = offsets_map[kv]
@@ -95,6 +95,8 @@ def plot_pareto_curve() -> None:
                 textcoords="offset points", xytext=ofs,
                 fontsize=8.5, ha="center", va="center",
                 bbox=bbox_white, zorder=6,
+                arrowprops=dict(arrowstyle="-", color="#888888",
+                                lw=0.6) if abs(ofs[1]) > 18 else None,
             )
 
         # highlight kr=0.5
