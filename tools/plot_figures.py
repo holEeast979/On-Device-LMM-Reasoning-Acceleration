@@ -34,14 +34,22 @@ def _setup_style() -> None:
     )
 
 
-def _annotate_kr(ax: plt.Axes, x: np.ndarray, y: np.ndarray, kr: List[float]) -> None:
+def _annotate_kr(
+    ax: plt.Axes, x: np.ndarray, y: np.ndarray, kr: List[float],
+    offsets: dict = None,
+) -> None:
+    """Annotate kr values with per-point offset overrides to avoid overlap."""
+    default_offset = (4, 8)
     for xi, yi, kri in zip(x, y, kr):
+        ofs = (offsets or {}).get(kri, default_offset)
+        if ofs == (0, 0):  # skip – handled separately (e.g. bold kr=0.5)
+            continue
         ax.annotate(
-            f"kr={kri:.1f}",
+            f"kr={kri}",
             (xi, yi),
             textcoords="offset points",
-            xytext=(4, 6),
-            fontsize=10,
+            xytext=ofs,
+            fontsize=9,
         )
 
 
@@ -98,15 +106,16 @@ def plot_pareto_curve() -> None:
         linewidth=1.5,
         label="Baseline 75.93%",
     )
-    ax1.text(
-        baseline_visual_tokens * 0.98,
-        baseline_accuracy + 0.2,
-        "Baseline 75.93%",
-        color="gray",
-        fontsize=10,
-        ha="right",
-    )
-    _annotate_kr(ax1, tokens[token_sort_idx], acc[token_sort_idx], kr[token_sort_idx].tolist())
+    # kr label offsets to avoid overlap (tokens axis, inverted)
+    token_kr_offsets = {
+        0.9: (-40, -14),  # bottom-left of point
+        0.7: (-40, 8),    # top-left
+        0.5: (0, 0),      # skip – bold annotation below
+        0.3: (6, 8),      # top-right (avoid -54% tokens label)
+        0.2: (6, -14),    # bottom-right
+    }
+    _annotate_kr(ax1, tokens[token_sort_idx], acc[token_sort_idx],
+                 kr[token_sort_idx].tolist(), offsets=token_kr_offsets)
 
     idx_05 = int(np.where(np.isclose(kr, 0.5))[0][0])
     ax1.scatter(
@@ -118,29 +127,23 @@ def plot_pareto_curve() -> None:
         linewidth=1.2,
         zorder=5,
     )
-    ax1.annotate(
-        "kr=0.5 (zero-loss)",
-        (tokens[idx_05], acc[idx_05]),
-        textcoords="offset points",
-        xytext=(10, -24),
-        fontsize=10,
-        fontweight="bold",
-    )
     token_reduction = (1.0 - tokens[idx_05] / baseline_visual_tokens) * 100.0
     ax1.annotate(
-        f"-{token_reduction:.0f}% tokens",
+        f"kr=0.5\nzero-loss, −{token_reduction:.0f}% tokens",
         (tokens[idx_05], acc[idx_05]),
         textcoords="offset points",
-        xytext=(10, -40),
-        fontsize=10,
+        xytext=(-20, -35),
+        fontsize=9,
+        fontweight="bold",
         color="#1f77b4",
+        ha="center",
     )
 
     ax1.set_title("Accuracy vs Visual Tokens")
     ax1.set_xlabel("Visual Tokens")
     ax1.set_ylabel("Accuracy (%)")
     ax1.invert_xaxis()
-    ax1.legend(loc="lower left", frameon=True)
+    ax1.legend(loc="lower left", frameon=True, framealpha=0.9, borderpad=0.8)
 
     ax2.plot(
         speed[speed_sort_idx],
@@ -167,15 +170,16 @@ def plot_pareto_curve() -> None:
         linewidth=1.5,
         label="Baseline 75.93%",
     )
-    ax2.text(
-        np.max(speed) * 0.98,
-        baseline_accuracy + 0.2,
-        "Baseline 75.93%",
-        color="gray",
-        fontsize=10,
-        ha="right",
-    )
-    _annotate_kr(ax2, speed[speed_sort_idx], acc[speed_sort_idx], kr[speed_sort_idx].tolist())
+    # kr label offsets for speedup axis
+    speed_kr_offsets = {
+        0.9: (6, -14),
+        0.7: (6, 8),
+        0.5: (0, 0),      # handled separately
+        0.3: (6, -14),
+        0.2: (6, 8),
+    }
+    _annotate_kr(ax2, speed[speed_sort_idx], acc[speed_sort_idx],
+                 kr[speed_sort_idx].tolist(), offsets=speed_kr_offsets)
     ax2.scatter(
         [speed[idx_05]],
         [acc[idx_05]],
@@ -186,16 +190,18 @@ def plot_pareto_curve() -> None:
         zorder=5,
     )
     ax2.annotate(
-        "2.1x faster, zero-loss",
+        "kr=0.5\n2.1× faster, zero-loss",
         (speed[idx_05], acc[idx_05]),
         textcoords="offset points",
-        xytext=(10, -24),
-        fontsize=10,
+        xytext=(-20, -35),
+        fontsize=9,
         fontweight="bold",
+        color="#1f77b4",
+        ha="center",
     )
     ax2.set_title("Accuracy vs Speedup")
     ax2.set_xlabel("Speedup (x)")
-    ax2.legend(loc="lower left", frameon=True)
+    ax2.legend(loc="lower left", frameon=True, framealpha=0.9, borderpad=0.8)
 
     for ax in (ax1, ax2):
         ax.set_ylim(60, 78)
