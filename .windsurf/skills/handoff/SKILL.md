@@ -1,4 +1,5 @@
 ---
+name: handoff
 description: 对话结束时的交接流程。更新 PROGRESS.md 并生成新对话的 Prompt，确保下一个 Agent 能无缝接续。
 ---
 

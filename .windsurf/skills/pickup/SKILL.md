@@ -1,4 +1,5 @@
 ---
+name: pickup
 description: 新对话开始时的接续流程。读取 PROGRESS.md 了解项目状态，快速进入工作状态。
 ---
 

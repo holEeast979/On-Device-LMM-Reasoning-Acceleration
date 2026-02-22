@@ -298,7 +298,8 @@ fasteromni/
 │   └── frame_decoder.py # I 帧解码
 └── phase1_archive/      # 废弃脚本
 
-tools/
+scripts/
+├── migrate_to_fs.sh     # 模型迁移到 autodl-fs（省 ~¥4/月）
 ├── plot_figures.py      # 论文图表生成（Pareto + MVBench 按任务图）
 └── mv_extraction_poc.py # Motion Vector 提取 PoC（Layer 3 验证）
 
