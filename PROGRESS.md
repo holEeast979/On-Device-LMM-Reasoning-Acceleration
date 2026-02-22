@@ -210,10 +210,27 @@
   └─► [GPU] LLM Prefill → 输出 Token
 ```
 
+#### 稀疏化模块三层架构
+
+| 层 | 功能 | 状态 | 说明 |
+|----|------|:----:|------|
+| **L1: I 帧均匀选取** | naive_iframe 覆盖度优先 | ✅ 完成 | kr=0.5 零损失，Two-Regime 理论验证 |
+| **L2: Adaptive kr** | max_frames 硬约束，防截断 | 🔄 实现中 | GPT Prompt 已就绪（`gpt_adaptive_kr_prompt.md`） |
+| **L3: Motion-Aware 补偿** | 时序敏感任务补充 P/B 帧信息 | ⬜ 设计阶段 | 用 MV 幅度做 motion-aware 非均匀采样（见下方） |
+
+> **L3 设计思路（P/B 帧运动向量）**：
+> - P/B 帧不存完整像素，存储 Motion Vector (MV) = 每个宏块相对参考帧的位移 (dx, dy)
+> - ffmpeg 可零成本从码流中导出 MV，不需解码像素
+> - MV 幅度大 = 运动剧烈 → 该区域密采样；MV 幅度小 = 静态 → 稀采样
+> - 将 naive 的"均匀采样"升级为 motion-aware 非均匀采样，仍是 training-free
+> - MVBench 按任务分析直接支持：7 个严重退化任务（moving_attribute -32.5pp 等）本质需要帧间运动信息
+> - ⚠️ 注意：GOP 数量受编码设置影响（keyframe_interval），不完全反映内容复杂度。L3 用 MV 而非 GOP 密度更鲁棒
+
 | # | 任务 | 优先级 | 说明 |
 |---|------|:------:|------|
+| P0 | **Adaptive kr（Layer 2）** | ⭐⭐⭐ | `kr = min(kr_base, max_frames / n_valid_gops)`，消除二次截断。Prompt: `gpt_adaptive_kr_prompt.md` |
 | P0 | **显存碎片优化** | ⭐⭐⭐ | 三层递进：ViT 后清理 → 输入规整化 → 分块编码。初版方案见 `docs/2.15-2.16 日.md` |
-| P0 | **Content-adaptive kr** | ⭐⭐⭐ | `kr = min(max_frames / N_gops, 0.5)` 等自适应规则，避免截断 |
+| P1 | **Motion-Aware 补偿（Layer 3）** | ⭐⭐ | MV 提取 + motion-aware 非均匀采样，解决时序敏感任务退化 |
 | P1 | **帧级 CPU/GPU 解耦** | ⭐⭐ | CPU 解码 batch N+1 的同时 GPU 编码 batch N，降峰值+提吞吐 |
 | P2 | **Ring Buffer 流水线** | ⭐ | 完整异步预取，作为论文 future work 或加分项 |
 
@@ -403,6 +420,7 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
+- **[2.22 晚-4]** Adaptive kr GPT Prompt 完成（`gpt_adaptive_kr_prompt.md`）。稀疏化三层架构规划：L1 I帧选取(✅) → L2 Adaptive kr(🔄) → L3 Motion-Aware P/B帧补偿(⬜)
 - **[2.22 晚-3]** MVBench 重跑结果分析完成。按任务分析：7个任务严重退化（Δ>-20pp），4个可接受/反超。action_count 反超+16.4pp（baseline OOM偏差）。支持 Adaptive kr 必要性
 - **[2.22 晚-2]** M/L 视频 Adaptive kr 方案讨论完成 + 项目定位更新为 HF 原生栈 training-free 插件式优化
 - **[2.22 晚]** 论文故事线讨论完成（Jarvis + East Hole）。核心定位：training-free codec-aware 端侧加速。CoPE-VideoLM 差异化明确
