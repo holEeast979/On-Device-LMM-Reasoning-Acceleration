@@ -80,7 +80,10 @@
 | sparse(0.5) | 2099/3600 | 57.36% | 261ms | 944 |
 | naive_iframe | 2099/3600 | 57.79% | 263ms | 944 |
 
-> ⚠️ 1501 errors = 7 个超短视频任务类别完全失败（视频仅 3-6 帧）
+> ⚠️ 1501 errors（1500 StopIteration + 1 No-I-frames）
+> **根因已定位**：1-GOP 视频（clevrer/ssv2 等数据集的编码方式）→ sparse 选 0 帧 → Qwen processor `next(audio_lengths)` 崩溃
+> **非视频长度问题**：失败视频有 5s/128帧，但编码为单 GOP。影响 1395 个唯一视频、7 个任务类别
+> **修复方案**：当 selected_frames=0 时 fallback 到至少保留 1 帧，或跳过音频对齐
 
 ### 音频角色
 
@@ -101,7 +104,7 @@
 | 2 | **Pareto naive_iframe kr sweep** | ✅ 完成 | kr=0.5 零损失（75.93%=BL），2.1x 加速 |
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
-| 5 | **MVBench 短视频问题调查** | ⬜ 待查 | 7/18 任务失败，需确认是 GOP 解析还是其他原因 |
+| 5 | **MVBench 1-GOP 修复** | ⬜ 待修 | 根因：1-GOP 视频选 0 帧致 processor 崩溃，需 fallback 逻辑 |
 | 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
 ### Phase 3（架构扩展）
@@ -210,7 +213,7 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 待探讨问题（供 Agent 讨论）
 
-- [ ] **MVBench 短视频 41.7% 失败率**：7/18 任务类别（视频 3-6 帧）完全失败，是 GOP 解析问题还是帧数不足？
+- [x] **MVBench 41.7% 失败率根因**：1-GOP 编码视频（clevrer/ssv2）→ sparse 选 0 帧 → processor 崩溃。修复：fallback 保留至少 1 帧
 - [ ] **Pareto 非单调**：kr=0.5 是峰值，kr>0.5 反而下降 → 冗余帧引入噪声？论文如何解释？
 - [ ] **Medium 音频干扰**：video_only > baseline (+4.4pp)，统计显著性待验证
 - [ ] **M/L sparse 无效**：max_frames=32 卡死，需要帧级选择或提高 max_frames
@@ -219,7 +222,8 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
-- **[2.22 AM]** MVBench 全量 + Pareto naive_iframe kr sweep 完成。核心发现：kr=0.5 零损失（=BL 75.93%），MVBench 短视频 7 任务失败
+- **[2.22 AM-2]** MVBench 失败根因定位：1-GOP 编码视频→sparse 选 0 帧→processor StopIteration。非视频长度问题，是编码格式问题
+- **[2.22 AM]** MVBench 全量 + Pareto naive_iframe kr sweep 完成。核心发现：kr=0.5 零损失（=BL 75.93%）
 - **[2.21 PM-5]** Non-inferiority 代码验证+commit。PROGRESS.md 精简（728行→~200行），历史归档到 PROGRESS_ARCHIVE.md
 - **[2.21 PM-4]** MVBench 代码就绪+数据保护约定+Non-inferiority prompt。Sparse@64 闭环分析完成
 - **[2.21 PM-3]** GPT Review 完成+MVBench 解压。论文定位转型确定
