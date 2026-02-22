@@ -316,10 +316,36 @@ run_all_experiments.sh   # 一键实验脚本
 3. **论文叙事**：整体加速流水线的故事线怎么讲？四个技术点（稀疏化/显存/自适应/流水线）如何组织成连贯的贡献？Pareto 非单调的论文解释？
 4. **老师建议整合**：之前老师对显存优化的具体反馈是什么？如何把"已有工作做过"转化为"我们的系统性整合是新的"？与 Mobile-VideoGPT 的差异化？
 
+### 论文故事线（2.22 Jarvis + East Hole 讨论）
+
+**一句话定位**：面向端侧设备的 training-free 视频推理加速框架，核心洞察是利用视频编码格式（GOP 结构）作为免费的冗余信号。
+
+**故事线（四段式）**：
+
+1. **问题**：多模态大模型处理视频时，visual tokens 占计算量的大头。现有加速方法要么需要额外训练（CoPE-VideoLM、Motion-Aware GOP Encoder），要么需要额外前向传播计算 attention score（FastV、LLaVA-PruMerge）。端侧设备算力有限，这些额外开销本身就是负担。
+
+2. **洞察**：视频编码格式（H.264/H.265）的 GOP 结构天然标记了帧间冗余——I 帧是信息密度最高的关键帧，这个信息解码时就能拿到，零额外计算。
+
+3. **方法**：围绕 GOP 结构设计一套完整的加速流水线：
+   - GOP 级帧选择（稀疏化）— 利用 I 帧做 token 压缩，kr=0.5 零损失
+   - AV-LRM 智能选帧 — 低预算时补充精准度，和 naive 形成互补（Two-Regime）
+   - GOP 边界分块编码 — 显存优化，解锁中长视频
+   - CPU/GPU 异步流水线 — 端到端延迟优化
+
+4. **贡献**：
+   - 首个 training-free 的 codec-aware 视频 LMM 加速方案
+   - 发现帧选择的 Two-Regime 现象（coverage-dominant vs relevance-dominant），为部署策略提供理论指导
+   - 双 benchmark（Video-MME + MVBench）验证，Pareto 曲线展示 accuracy-efficiency tradeoff
+
+**核心卖点**：codec-aware、training-free、端侧多模态
+
+**与 CoPE-VideoLM 的区分**：CoPE 训练 encoder 走学术路线（-93% tokens 但需要预训练+微调），我们不改模型走部署路线（即插即用，适合端侧）
+
 ---
 
 ## 变更日志
 
+- **[2.22 晚]** 论文故事线讨论完成（Jarvis + East Hole）。核心定位：training-free codec-aware 端侧加速。CoPE-VideoLM 差异化明确
 - **[2.22 午后-2]** Pareto 非单调根因分析完成（max_frames 截断+I 帧时间聚类）。Phase 3 架构规划完成。手机讨论方向整理
 - **[2.22 午后]** Sanity Check 通过（86.1%一致率+token减54%+8题翻转对称抵消）。pipeline 无 bug，kr=0.5 零损失确认为真实现象。GPT Review concern 全部关闭。MVBench 重跑中
 - **[2.22 午前-2]** GPT 5.2 Review 完成。核心结论：(1) kr=0.5=BL 需 Sanity Check 排除 pipeline bug; (2) AV-LRM 加覆盖约束后再判断; (3) 短期收尾 move on

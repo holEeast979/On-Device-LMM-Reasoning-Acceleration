@@ -553,14 +553,14 @@ Per-Video Bootstrap（按 video_file_id 聚合后）：
 
 > 从 Obsidian / GPT / 导师收集的结论和方向变化
 
-- **[2.16] GPT Code Review**：8 个问题，已修 6 个。核心发现：音频链路断裂、TTFT 口径错误。修复后加速比从 2.39x 升至 3.77x（因为修前 max_new_tokens=32 掩盖了 prefill 差异）。
-- **[2.15] Claude 架构建议**：先串行跑通再拆并行，Phase 1-4 路线图（已大部分落地）。
-- **[2.15] GPT 执行清单**：当天完成 GOP 解析 + 串行 Baseline + 稀疏化初测。
-- **[2.18] Jarvis 讨论 - content-adaptive sparsification**：结论是 Phase 2 优化项，不是核心贡献。理由：①kr 消融已证明精度对 kr 不敏感，动态调 kr 收益空间小 ②alpha 在短视频无区分度 ③需要额外分类器判断视频类型，增加复杂度 ④论文核心应简洁，固定 kr 就能讲清框架价值。定位：稀疏化 pipeline 的一个可选优化环节，Phase 2 用于优化逐视频波动大的 tail case。
-- **[2.18] Jarvis 讨论 - GOP 粒度上限**：短视频 GOP 中位数仅 5，alpha 和打分公式无区分度，这是 H.264 编码特性决定的已知限制。但不影响主线贡献：加速收益来自"砍掉多少 token"而非"选哪几个 GOP"，精度对 kr 不敏感也印证了这一点。GOP 级筛选对长视频（GOP 100+）有足够选择空间，打分公式和 alpha 预期有效。短视频暴露的粒度不足问题引出 Phase 2 方向：帧级选择（GOP 内选 P/B 帧），在更细粒度上优化短视频筛选。
-- **[2.18] Jarvis 讨论 - M/L 视频 sparse 失效分析**：由于硬件显存约束（32GB），M/L 视频必须加 max_frames=32 限制，导致 sparse 选完 GOP 后 I 帧数仍超上限被截断，与 baseline 完全一致。但反过来看，这恰好是 sparse 的价值所在：结合稀疏化可以提高 max_frames 上限（如 64 甚至更高）而不 OOM，从而让端侧设备支持更长视频。这是"稀疏化扩展能力边界"的贡献点，待 P1 #3（Sparse@64 + Baseline@64 OOM 验证）实验确认。
-- **[2.18] Jarvis 讨论 - Prefill 53% "Other" 开销已定性**：回溯 1 月初 10 视频 TTFT 分解实验（1.6 日后进展汇总），确认 Others 是**固定开销（Fixed Overhead）**，$R^2=0.04$，与 token 数量无相关性。具体来源：①PyTorch/HF 框架调度开销（generate 调用链、模型初始化）②CUDA context + kernel launch ③内存分配器预热 + KV cache 初始化 ④CPU-GPU 同步等待（Wall-clock 计时包含）⑤Python GIL 开销。vLLM 对比实验已验证可压缩此部分。注意：换了 Qwen2.5-Omni + FasterOmni pipeline 后 53% 这个具体数字可能变化，但"固定开销"的定性结论不变。此问题可从待探讨列表划掉。
+- **[2.22 晚] Jarvis + East Hole 讨论 - 论文故事线**：完整的四段式故事线已确定。一句话定位：面向端侧设备的 training-free 视频推理加速框架，核心洞察是利用视频编码格式（GOP 结构）作为免费的冗余信号。故事线包括：(1) 问题：visual tokens 占计算量大头，现有加速方法需额外训练或计算 (2) 洞察：GOP 结构天然标记帧间冗余，I 帧信息解码时就能拿到，零额外计算 (3) 方法：GOP 级帧选择+AV-LRM 智能选帧+GOP 边界分块编码+CPU/GPU 异步流水线 (4) 贡献：首个 training-free codec-aware 方案、Two-Regime 理论、双 benchmark 验证。与 CoPE-VideoLM 的差异化明确：CoPE 训练 encoder 走学术路线（-93% tokens 但需预训练+微调），我们不改模型走部署路线（即插即用，适合端侧）。
 - **[2.19] GPT-5.2 Phase 1 Review**：质量很高，发现多个致命问题。分级如下：
+  - **Critical**：①**新颖性/归因风险** — kr 不敏感可能意味着"选哪几帧不重要"，必须补 naive baselines（等间隔/随机/只取 I 帧不打分等）否则 AV-LRM 贡献点站不住 ②**公平性混淆** — sparse 截断音频到选中 GOP 时间跨度，baseline 用全音频，speedup 混入了"音频 token 减少"效应（实测仅 7.9%，但需明确说明）③**适用范围** — M/L 无效是结构性问题，必须做 Sparse@64 vs Baseline@64 打穿
+  - **Major**：①**统计方法** — 108 题来自 36 视频（每视频 3 题），题级不独立，需按视频为单位报告+配对检验 ②**kr 不敏感解释** — 可能是 benchmark bias（语言先验强），需补 text-only/audio-only/video-only 下界确认模型吃了多少视觉信息 ③**Counting 暴跌** — TopK + uniform coverage（固定首尾 + K-2 按分数选）④**AV-LRM 有效性** — 写清楚是可选插件，或在高 GOP 场景证明优于 naive ⑤**CPU 解码口径** — 论文别说"只解码 I 帧快"，最多说"可优化"
+  - **Minor**：①gop_parser.py 实际用 PyAV 不是 ffprobe，表述不一致 ②gop_parser/audio_energy 仍有 av.open 无超时 ③decode_i_frames_seek 可能取错 keyframe
+  - **Positive**：①增量 CSV+resume+内核级超时是 paper-level 工程 ②关键口径已修正结论可信 ③负面点提前暴露 Phase 2 有抓手
+  - **GPT 建议最小代价方案**：补 3 个对照（text-only / audio-only / naive-uniform 同帧数）+ 1 个关键实验（Baseline@64 vs Sparse@64）
+- **[2.18] Jarvis 讨论 - Prefill 53% "Other" 开销已定性**：回溯 1 月初 10 视频 TTFT 分解实验（1.6 日后进展汇总），确认 Others 是**固定开销（Fixed Overhead）**，$R^2=0.04$，与 token 数量无相关性。具体来源：①PyTorch/HF 框架调度开销（generate 调用链、模型初始化）②CUDA context + kernel launch ③内存分配器预热 + KV cache 初始化 ④CPU-GPU 同步等待（Wall-clock 计时包含）⑤Python GIL 开销。vLLM 对比实验已验证可压缩此部分。注意：换了 Qwen2.5-Omni + FasterOmni pipeline 后 53% 这个具体数字可能变化，但"固定开销"的定性结论不变。此问题可从待探讨列表划掉。
   - **Critical**：①**新颖性/归因风险** — kr 不敏感可能意味着"选哪几帧不重要"，必须补 naive baselines（等间隔/随机/只取 I 帧不打分等）否则 AV-LRM 贡献点站不住 ②**公平性混淆** — sparse 截断音频到选中 GOP 时间跨度，baseline 用全音频，speedup 混入了"音频 token 减少"效应（实测仅 7.9%，但需明确说明）③**适用范围** — M/L 无效是结构性问题，必须做 Sparse@64 vs Baseline@64 打穿
   - **Major**：①**统计方法** — 108 题来自 36 视频（每视频 3 题），题级不独立，需按视频为单位报告+配对检验 ②**kr 不敏感解释** — 可能是 benchmark bias（语言先验强），需补 text-only/audio-only/video-only 下界确认模型吃了多少视觉信息 ③**Counting 暴跌** — TopK + uniform coverage（固定首尾 + K-2 按分数选）④**AV-LRM 有效性** — 写清楚是可选插件，或在高 GOP 场景证明优于 naive ⑤**CPU 解码口径** — 论文别说"只解码 I 帧快"，最多说"可优化"
   - **Minor**：①gop_parser.py 实际用 PyAV 不是 ffprobe，表述不一致 ②gop_parser/audio_energy 仍有 av.open 无超时 ③decode_i_frames_seek 可能取错 keyframe
