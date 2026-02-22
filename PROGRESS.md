@@ -14,16 +14,16 @@
 
 ---
 
-## 当前状态（2.22 午后）
+## 当前状态（2.22 晚）
 
-**Sanity Check 通过，kr=0.5 零损失已确认为真实现象。MVBench 重跑中，完成后进入 Phase 3 架构扩展。**
+**MVBench 重跑完成，全部数据就绪。进入 Phase 3 架构扩展（Adaptive kr + 显存优化）。**
 
 - ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI + Non-inferiority）
 - ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
 - ✅ **Sanity Check 通过**（详见下方结论）— pipeline 无 bug，kr=0.5 零损失是真实现象
 - ✅ **1-GOP fallback 已修复**（`c0069fc`，smoke test 3/3 pass）
 - ✅ **GPT 5.2 Review 完成 + 问题已关闭**
-- 🔄 **MVBench 重跑中**（tmux `eval`，1-GOP 修复后全量 3 mode × 3600 题）
+- ✅ **MVBench 重跑完成**（1-GOP 修复后全量 3 mode × 3600 题）
 
 ### ⬇️ 新对话 Agent 立即执行事项
 
@@ -31,9 +31,9 @@
 2. ✅ ~~Smoke test~~ — 3/3 pass
 3. ✅ ~~GPT 5.2 Review~~ — 已完成，结论已整合
 4. ✅ ~~Sanity Check~~ — **通过**（pipeline 无 bug，详见下方）
-5. 🔄 **MVBench 重跑中**（tmux `eval`）
-6. 待 分析 MVBench 新数据 + 新旧对比
-7. 待 Phase 3 架构扩展（显存优化 / Ring Buffer）
+5. ✅ ~~MVBench 重跑~~ — 完成
+6. 🔄 **分析 MVBench 新数据 + 更新结果表**
+7. 待 Phase 3 架构扩展（Adaptive kr + 显存优化）
 
 ### Sanity Check 结论（2.22 午后）✅ 已关闭
 
@@ -116,18 +116,47 @@
 | 0.7 | 71.30% | -4.63pp | 6658 (62%) | 1.6x |
 | 0.9 | 70.37% | -5.56pp | 7794 (73%) | 1.4x |
 
-### MVBench 全量结果
+### MVBench 全量结果（1-GOP 修复后重跑）
 
-| Mode | Valid/Total | Accuracy | Generate ms | Visual Tokens |
-|------|-----------|----------|------------|---------------|
-| baseline | 3318/3600 | 66.94% | 1032ms | 5570 |
-| sparse(0.5) | 2099/3600 | 57.36% | 261ms | 944 |
-| naive_iframe | 2099/3600 | 57.79% | 263ms | 944 |
+| Mode | Valid/Total | Accuracy | Errors | Avg Generate ms | Avg Visual Tokens | Avg Frames |
+|------|-----------|----------|--------|----------------|-------------------|------------|
+| **baseline** | 3318/3600 | **66.94%** | 282 (OOM) | 1054ms | 5570 | 29.8 |
+| naive_iframe(0.5) | 3579/3600 | 53.59% | 21 | 196ms | 628 | 3.0 |
+| sparse(0.5) | 3579/3600 | 53.34% | 21 | 198ms | 628 | 3.0 |
 
-> ⚠️ 1501 errors（1500 StopIteration + 1 No-I-frames）
-> **根因已定位**：1-GOP 视频（clevrer/ssv2 等数据集的编码方式）→ sparse 选 0 帧 → Qwen processor `next(audio_lengths)` 崩溃
-> **非视频长度问题**：失败视频有 5s/128帧，但编码为单 GOP。影响 1395 个唯一视频、7 个任务类别
-> **修复方案**：当 selected_frames=0 时 fallback 到至少保留 1 帧，或跳过音频对齐
+> **vs 修复前**：错误数从 1501 降至 21（naive/sparse），新增处理了 1480 个之前崩溃的 1-GOP 视频
+> **Baseline 的 282 个 OOM**：全是长视频内存溢出，即使按 OOM=答错 校正，准确率仍有 61.7%（> naive 53.6%）
+> **关键发现**：MVBench 帧预算极低（kr=0.5 后仅 ~3 帧 vs baseline ~30 帧），时序密集型任务严重退化
+> **naive ≈ sparse**：视觉 token 数完全相同（628），kr=0.5 处于 Coverage-dominant 区间，AV-LRM 打分无额外优势
+
+#### MVBench 按任务分析
+
+| 任务 | Baseline | naive_iframe | Δ | 类别 |
+|------|----------|-------------|---|------|
+| counterfactual_inference | 68.0% | 32.0% | **-36.0pp** | 🔴 严重退化 |
+| object_existence | 88.5% | 55.5% | **-33.0pp** | 🔴 严重退化 |
+| moving_attribute | 95.0% | 62.5% | **-32.5pp** | 🔴 严重退化 |
+| moving_direction | 59.5% | 37.0% | -22.5pp | 🔴 严重退化 |
+| action_sequence | 75.4% | 53.0% | -22.4pp | 🔴 严重退化 |
+| action_prediction | 68.0% | 46.0% | -22.0pp | 🔴 严重退化 |
+| moving_count | 69.0% | 47.0% | -22.0pp | 🔴 严重退化 |
+| object_interaction | 75.8% | 58.5% | -17.3pp | 🟡 中等退化 |
+| action_antonym | 79.5% | 69.3% | -10.2pp | 🟡 中等退化 |
+| character_order | 74.1% | 64.0% | -10.1pp | 🟡 中等退化 |
+| action_localization | 44.3% | 35.0% | -9.3pp | 🟡 中等退化 |
+| egocentric_navigation | 39.5% | 32.0% | -7.5pp | 🟡 中等退化 |
+| object_shuffle | 37.9% | 35.0% | -2.9pp | 🟢 可接受 |
+| unexpected_action | 82.1% | 80.0% | -2.1pp | 🟢 可接受 |
+| state_change | 60.7% | 59.5% | -1.2pp | 🟢 可接受 |
+| scene_transition | 96.5% | 96.5% | +0.0pp | 🟢 无损 |
+| fine_grained_action | 47.5% | 48.7% | +1.2pp | 🟢 反超 |
+| action_count | 34.6% | 51.0% | **+16.4pp** | 🟢 大幅反超 |
+
+**分析**：
+- 🔴 **严重退化（7 个任务，Δ > -20pp）**：全是短视频（BL visual tokens ~935，即 ~2 帧原始视频），kr=0.5 后只剩 ~1 帧，时序信息完全丧失
+- 🟢 **action_count 反超 +16.4pp**：baseline 只有 162/200 valid（38 个 OOM），naive 处理全部 200 个。naive 能处理 baseline OOM 的长视频，且 baseline 本身在这个任务上就很差（34.6%，接近随机 25%）
+- 🟢 **scene_transition 完全无损**：场景转换只需少量关键帧即可判断
+- **结论**：帧削减在"需要精细时序"的短视频任务上代价大，在"场景级理解"任务上几乎无损。**支持 Adaptive kr 的必要性——不同视频/任务需要不同的帧预算**
 
 ### 音频角色
 
@@ -149,7 +178,7 @@
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
 | 5 | **MVBench 1-GOP 修复** | ✅ 完成 | `c0069fc` valid_gops≤1 时 skip_audio，smoke test 3/3 pass |
-| 5b | **MVBench 重跑** | 🔄 运行中 | 修复后重跑 3 mode × 3600 题（tmux `eval`） |
+| 5b | **MVBench 重跑** | ✅ 完成 | BL 66.9%, naive 53.6%, sparse 53.3%。详见按任务分析 |
 | 5c | **GPT 5.2 Review** | ✅ 完成 | 结论已整合，concern 已关闭 |
 | 5d | **Sanity Check** | ✅ 通过 | pipeline 无 bug，86.1%一致+token减54%+8题翻转对称抵消 |
 | 5e | **覆盖约束打分** | ⬜ 可选 | 分段top-1 或 temporal NMS，验证 AV-LRM 是否值得投入 |
@@ -374,6 +403,7 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
+- **[2.22 晚-3]** MVBench 重跑结果分析完成。按任务分析：7个任务严重退化（Δ>-20pp），4个可接受/反超。action_count 反超+16.4pp（baseline OOM偏差）。支持 Adaptive kr 必要性
 - **[2.22 晚-2]** M/L 视频 Adaptive kr 方案讨论完成 + 项目定位更新为 HF 原生栈 training-free 插件式优化
 - **[2.22 晚]** 论文故事线讨论完成（Jarvis + East Hole）。核心定位：training-free codec-aware 端侧加速。CoPE-VideoLM 差异化明确
 - **[2.22 午后-2]** Pareto 非单调根因分析完成（max_frames 截断+I 帧时间聚类）。Phase 3 架构规划完成。手机讨论方向整理
