@@ -21,14 +21,15 @@
 - ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI + Non-inferiority）
 - ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
 - ✅ **MVBench 全量** 完成（3 mode × 3600 题）— 但 1501/3600 失败（根因已定位）
-- 🔄 **待执行**：修复 1-GOP fallback bug → 重跑 MVBench 全量 → GPT 5.2 Review
+- ✅ **1-GOP fallback 已修复**（`c0069fc`，smoke test 3/3 pass）
+- 🔄 **待执行**：重跑 MVBench 全量 → 分析新数据 → GPT 5.2 Review（审查实验数据）
 
 ### ⬇️ 新对话 Agent 立即执行事项
 
-1. **修复 `pipeline.py`**：`_select_sparse` 和 `_select_naive` 中，当 `valid_gops <= 1` 时跳过音频（`skip_audio=True`），避免 Qwen processor StopIteration
-2. **Smoke test**：用 `video_11397.mp4`（clevrer，1-GOP）和 `166583.webm`（action_antonym）验证修复
-3. **重跑 MVBench**：3 mode × 3600 题（~4h，后台 tmux 执行）
-4. **GPT 5.2 Review**：审核完整数据 + 论文故事线
+1. ✅ ~~修复 `pipeline.py`~~ — `c0069fc`，valid_gops≤1 时 skip_audio
+2. ✅ ~~Smoke test~~ — 3/3 pass（sparse 1-GOP / naive 1-GOP / 回归多-GOP）
+3. 🔄 **重跑 MVBench**：3 mode × 3600 题（~4h，后台 tmux 执行）
+4. 待 **分析新数据** + **GPT 5.2 Review**（审查实验数据，不是论文）
 
 ---
 
@@ -111,8 +112,8 @@
 | 2 | **Pareto naive_iframe kr sweep** | ✅ 完成 | kr=0.5 零损失（75.93%=BL），2.1x 加速 |
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
-| 5 | **MVBench 1-GOP 修复** | ⬜ **下一步** | valid_gops≤1 时 skip_audio，避免 processor StopIteration |
-| 5b | **MVBench 重跑** | ⬜ 待#5 | 修复后重跑 3 mode × 3600 题（~4h tmux） |
+| 5 | **MVBench 1-GOP 修复** | ✅ 完成 | `c0069fc` valid_gops≤1 时 skip_audio，smoke test 3/3 pass |
+| 5b | **MVBench 重跑** | ⬜ **下一步** | 修复后重跑 3 mode × 3600 题（~4h tmux） |
 | 5c | **GPT 5.2 Review** | ⬜ 待#5b | 审核完整数据 + 论文结构 + Figure 清单 |
 | 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
@@ -217,6 +218,20 @@ run_all_experiments.sh   # 一键实验脚本
 | LLaVA-PruMerge | 融合+剪枝 visual tokens | 模型内部 vs 预处理阶段 | 待调研 |
 | **Mobile-VideoGPT** | 注意力关键帧+token剪枝 | 端侧，思路类似 | ✅ 已调研 |
 | MiniCPM-o | 端侧全模态 | 功能更全，未专注稀疏化 | 待调研 |
+
+---
+
+## 工作流程规范
+
+### Review 规范
+- **每个技术点最多 1 轮 Review**，聚焦 go/no-go（数据有没有问题）
+- **实验数据 Review ≠ 论文 Review**：当前阶段只审查实验链路和数据可信度
+- 论文结构 Review 等所有技术点完成后再做
+- Review 无致命问题 → 锁定数据，推进下一个技术点
+
+### 推进节奏
+- 稀疏化模块未完成项：Content-adaptive kr / Hybrid 策略
+- 完成顺序：修 bug → 重跑实验 → Review 数据 → 开发自适应 → 推进下一技术点
 
 ---
 
