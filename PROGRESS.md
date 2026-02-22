@@ -106,6 +106,34 @@
 - **交叉点在 kr≈0.3**：两种方法持平（69.44%）
 - 这解释了为什么 kr=0.5 时 AV-LRM 最差、kr=0.2 时最优
 
+### AV-LRM 坦诚评价
+
+**结论：AV-LRM（视觉方差+音频能量打分）在绝大多数场景下不如 naive I 帧均匀选取。**
+
+**为什么有限制？**
+- AV-LRM 衡量的是"GOP 内容变化大不大"（视觉方差）和"声音活跃程度"（音频能量）
+- 但"内容变化大" ≠ "对回答问题有用"——它 **不理解问题**，无法做 question-aware 的帧选择
+- 要理解问题需要用模型做前向推理（类似 FastV 的 attention pruning），与 training-free 预处理定位矛盾
+- 短视频 QA 任务中，时间覆盖度 > 内容选择性，均匀采样已经是最优策略
+
+**从 AV-LRM 中得到的结论（有学术价值）**：
+1. **Two-Regime 发现**：覆盖度优先 vs 精准度优先的交叉点在 kr≈0.3，为部署策略提供量化依据
+2. **简单 > 复杂**：对短视频 QA，不需要复杂打分，均匀 I 帧即可
+3. **演进方向**：从统计特征（AV-LRM）→ 物理运动信号（Motion Vector）是更有效的 training-free 信号
+
+**论文定位**：AV-LRM 作为早期探索如实报告，Two-Regime 发现是独立贡献，核心方法是 GOP-aware I 帧选取 + Adaptive kr + Motion-Aware 采样
+
+### 核心技术路线（2.22 晚确认）
+
+```
+短视频 / 大部分场景     → naive I 帧均匀选取（kr=0.5 零损失，2.1x 加速）
+中长视频               → Adaptive kr 防截断 + 显存优化提上限
+时序敏感任务           → Motion-Aware P/B 帧补偿（Layer 3）
+极端低预算 (kr≤0.2)   → AV-LRM 有微弱优势，可作为可选模式保留
+```
+
+**一句话**：大部分场景 naive I 帧就够了，只有时序敏感任务才需要在 P/B 帧上做文章。
+
 ### Pareto 曲线（naive_iframe × Video-MME Short）
 
 | kr | Accuracy | vs Baseline | Visual Tokens | Speedup |
@@ -420,6 +448,7 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
+- **[2.22 晚-5]** AV-LRM 坦诚评价写入 PROGRESS.md。核心技术路线确认：naive I帧为主力，Motion-Aware L3 解决时序敏感任务，AV-LRM 作为 Two-Regime 发现保留
 - **[2.22 晚-4]** Adaptive kr GPT Prompt 完成（`gpt_adaptive_kr_prompt.md`）。稀疏化三层架构规划：L1 I帧选取(✅) → L2 Adaptive kr(🔄) → L3 Motion-Aware P/B帧补偿(⬜)
 - **[2.22 晚-3]** MVBench 重跑结果分析完成。按任务分析：7个任务严重退化（Δ>-20pp），4个可接受/反超。action_count 反超+16.4pp（baseline OOM偏差）。支持 Adaptive kr 必要性
 - **[2.22 晚-2]** M/L 视频 Adaptive kr 方案讨论完成 + 项目定位更新为 HF 原生栈 training-free 插件式优化
