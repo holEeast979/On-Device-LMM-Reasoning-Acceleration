@@ -22,14 +22,33 @@
 - ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
 - ✅ **MVBench 全量** 完成（3 mode × 3600 题）— 但 1501/3600 失败（根因已定位）
 - ✅ **1-GOP fallback 已修复**（`c0069fc`，smoke test 3/3 pass）
-- 🔄 **待执行**：重跑 MVBench 全量 → 分析新数据 → GPT 5.2 Review（审查实验数据）
+- ✅ **GPT 5.2 Review 完成**（审查实验数据，见下方 Review 结论）
+- 🔄 **待执行**：重跑 MVBench 全量 + **Sanity Check**（kr=0.5 是否真的零损失）
 
 ### ⬇️ 新对话 Agent 立即执行事项
 
-1. ✅ ~~修复 `pipeline.py`~~ — `c0069fc`，valid_gops≤1 时 skip_audio
-2. ✅ ~~Smoke test~~ — 3/3 pass（sparse 1-GOP / naive 1-GOP / 回归多-GOP）
-3. 🔄 **重跑 MVBench**：3 mode × 3600 题（~4h，后台 tmux 执行）
-4. 待 **分析新数据** + **GPT 5.2 Review**（审查实验数据，不是论文）
+1. ✅ ~~修复 `pipeline.py`~~ — `c0069fc`
+2. ✅ ~~Smoke test~~ — 3/3 pass
+3. ✅ ~~GPT 5.2 Review~~ — 已完成，结论已整合
+4. 🔄 **重跑 MVBench** + **Sanity Check**（当前步骤）
+5. 待 分析新数据 + 决定是否加覆盖约束版打分
+
+### GPT 5.2 Review 结论（2.22）
+
+**必须立即做的 Sanity Check**：
+- [ ] kr=0.5 和 baseline 的逐样本预测是否完全一致？如果一条都不变 → pipeline bug
+- [ ] 记录实际选帧索引 + visual token 数，确认模型接收到的输入不同
+- [ ] 测试 kr=0.4 / 0.6，如果准确率“钉死”同一值 → 优先怀疑 pipeline
+
+**AV-LRM 优化建议**：
+- 当前 top-K 缺多样性约束，帧可能集中在同一段
+- 低成本改动：“分段 top-1”或 temporal NMS（强制最小时间间隔）
+- 如果加了覆盖约束仍不如 naive → 打分就不再投入
+
+**论文贡献度评伋**：
+- 如果方法 = “均匀抽 I 帧”，单独偏弱
+- 需要站稳：多数据集 tradeoff 曲线 + 端到端收益 + GOP 视角独特性
+- **建议**：短期收尾（1-2天）→ 定型稀疏化 → move on 到下一技术点
 
 ---
 
@@ -114,7 +133,9 @@
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
 | 5 | **MVBench 1-GOP 修复** | ✅ 完成 | `c0069fc` valid_gops≤1 时 skip_audio，smoke test 3/3 pass |
 | 5b | **MVBench 重跑** | ⬜ **下一步** | 修复后重跑 3 mode × 3600 题（~4h tmux） |
-| 5c | **GPT 5.2 Review** | ⬜ 待#5b | 审核完整数据 + 论文结构 + Figure 清单 |
+| 5c | **GPT 5.2 Review** | ✅ 完成 | 结论：Sanity Check kr=0.5 + 加覆盖约束打分对照 + 短期收尾 move on |
+| 5d | **Sanity Check** | ⬜ 待#5b | 逐样本对比 + kr=0.4/0.6 测试 + visual token 确认 |
+| 5e | **覆盖约束打分** | ⬜ 可选 | 分段top-1 或 temporal NMS，验证 AV-LRM 是否值得投入 |
 | 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
 ### Phase 3（架构扩展）
@@ -246,7 +267,8 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
-- **[2.22 午前]** MVBench 根因完整分析：1-GOP编码视频(clevrer/ssv2)→1帧+音频→Qwen processor `next(audio_lengths)` StopIteration。修复方案确定：valid_gops≤1时skip_audio。设计了 Codex prompt + Review prompt，等待执行
+- **[2.22 午前-2]** GPT 5.2 Review 完成。核心结论：(1) kr=0.5=BL 需 Sanity Check 排除 pipeline bug; (2) AV-LRM 加覆盖约束后再判断; (3) 短期收尾 move on
+- **[2.22 午前]** 1-GOP fallback 修复(c0069fc)+工作流程规范+MVBench重跑准备
 - **[2.22 AM-2]** MVBench 失败根因定位：1-GOP 编码视频→sparse 选 1 帧+音频→processor StopIteration
 - **[2.22 AM]** MVBench 全量 + Pareto naive_iframe kr sweep 完成。核心发现：kr=0.5 零损失（=BL 75.93%）
 - **[2.21 PM-5]** Non-inferiority 代码验证+commit。PROGRESS.md 精简（728行→~200行），历史归档到 PROGRESS_ARCHIVE.md
