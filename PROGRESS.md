@@ -14,31 +14,48 @@
 
 ---
 
-## 当前状态（2.22 午前）
+## 当前状态（2.22 午后）
 
-**核心实验全部完成。下一步：修复 1-GOP fallback → 重跑 MVBench → GPT Review → 论文写作。**
+**Sanity Check 通过，kr=0.5 零损失已确认为真实现象。MVBench 重跑中，完成后进入 Phase 3 架构扩展。**
 
 - ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI + Non-inferiority）
 - ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
-- ✅ **MVBench 全量** 完成（3 mode × 3600 题）— 但 1501/3600 失败（根因已定位）
+- ✅ **Sanity Check 通过**（详见下方结论）— pipeline 无 bug，kr=0.5 零损失是真实现象
 - ✅ **1-GOP fallback 已修复**（`c0069fc`，smoke test 3/3 pass）
-- ✅ **GPT 5.2 Review 完成**（审查实验数据，见下方 Review 结论）
-- 🔄 **待执行**：重跑 MVBench 全量 + **Sanity Check**（kr=0.5 是否真的零损失）
+- ✅ **GPT 5.2 Review 完成 + 问题已关闭**
+- 🔄 **MVBench 重跑中**（tmux `eval`，1-GOP 修复后全量 3 mode × 3600 题）
 
 ### ⬇️ 新对话 Agent 立即执行事项
 
 1. ✅ ~~修复 `pipeline.py`~~ — `c0069fc`
 2. ✅ ~~Smoke test~~ — 3/3 pass
 3. ✅ ~~GPT 5.2 Review~~ — 已完成，结论已整合
-4. 🔄 **重跑 MVBench** + **Sanity Check**（当前步骤）
-5. 待 分析新数据 + 决定是否加覆盖约束版打分
+4. ✅ ~~Sanity Check~~ — **通过**（pipeline 无 bug，详见下方）
+5. 🔄 **MVBench 重跑中**（tmux `eval`）
+6. 待 分析 MVBench 新数据 + 新旧对比
+7. 待 Phase 3 架构扩展（显存优化 / Ring Buffer）
+
+### Sanity Check 结论（2.22 午后）✅ 已关闭
+
+**结论：pipeline 无 bug，kr=0.5 零损失是真实现象。**
+
+脚本：`fasteromni/sanity_check_kr05.py` | 报告：`/root/autodl-tmp/results/fasteromni/sanity_check_kr05_report.json`
+
+| 检查项 | 结果 | 判定 |
+|--------|------|------|
+| A1 预测一致性 | 93/108 = 86.1% | ✅ 14%的题预测不同，帧选择影响了模型行为 |
+| A2 Visual Tokens | 10737→4939（-54%） | ✅ 帧选择完全生效，token 减半 |
+| A3 帧数 | 32→平均14.4（范围4-32） | ✅ 帧数确实不同 |
+| A4 翻转 | degraded=4, improved=4 | ✅ 8题翻转恰好对称抵消 |
+
+**通俗解释**：模型看到的画面确实少了一半（14帧 vs 32帧），但 Short 视频大部分题靠少量关键帧就能答对。15 题答案变了，4 题变好 4 题变差恰好抵消，所以总准确率相同。
 
 ### GPT 5.2 Review 结论（2.22）
 
-**必须立即做的 Sanity Check**：
-- [ ] kr=0.5 和 baseline 的逐样本预测是否完全一致？如果一条都不变 → pipeline bug
-- [ ] 记录实际选帧索引 + visual token 数，确认模型接收到的输入不同
-- [ ] 测试 kr=0.4 / 0.6，如果准确率“钉死”同一值 → 优先怀疑 pipeline
+**Sanity Check**（已关闭 ✅）：
+- [x] kr=0.5 和 baseline 的逐样本预测是否完全一致？→ **86.1% 一致，14% 不同**
+- [x] 记录实际选帧索引 + visual token 数 → **token 减少 54%，帧数 32→14.4**
+- [x] 测试 kr=0.4 / 0.6 → **已有 kr=0.3(69.44%) 和 kr=0.7(71.30%) 数据，均≠75.93%，无需额外跑**
 
 **AV-LRM 优化建议**：
 - 当前 top-K 缺多样性约束，帧可能集中在同一段
@@ -132,20 +149,44 @@
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
 | 5 | **MVBench 1-GOP 修复** | ✅ 完成 | `c0069fc` valid_gops≤1 时 skip_audio，smoke test 3/3 pass |
-| 5b | **MVBench 重跑** | ⬜ **下一步** | 修复后重跑 3 mode × 3600 题（~4h tmux） |
-| 5c | **GPT 5.2 Review** | ✅ 完成 | 结论：Sanity Check kr=0.5 + 加覆盖约束打分对照 + 短期收尾 move on |
-| 5d | **Sanity Check** | ⬜ 待#5b | 逐样本对比 + kr=0.4/0.6 测试 + visual token 确认 |
+| 5b | **MVBench 重跑** | 🔄 运行中 | 修复后重跑 3 mode × 3600 题（tmux `eval`） |
+| 5c | **GPT 5.2 Review** | ✅ 完成 | 结论已整合，concern 已关闭 |
+| 5d | **Sanity Check** | ✅ 通过 | pipeline 无 bug，86.1%一致+token减54%+8题翻转对称抵消 |
 | 5e | **覆盖约束打分** | ⬜ 可选 | 分段top-1 或 temporal NMS，验证 AV-LRM 是否值得投入 |
 | 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
-### Phase 3（架构扩展）
+### Phase 3（架构扩展）— 整体加速流水线
 
-| # | 任务 | 说明 |
-|---|------|------|
-| 6 | **显存碎片优化** | ViT 后 hook 清理激活值 → 降低峰值 → 支持更长视频 |
-| 7 | **Ring Buffer 流水线** | CPU/GPU 异步预取，隐藏预处理延迟 |
-| 8 | **Content-adaptive kr** | 根据视频内容动态调 kr |
-| 9 | **P/B 帧选择** | GOP 内选帧，更细粒度优化 |
+**核心目标**：解决中长视频的 max_frames=32 瓶颈，构建端到端加速系统。
+
+**已定位的关键问题**：kr>0.5 准确率下降的根因是 max_frames=32 截断。同一批视频，kr=0.5 给 26 帧得 83.3%，kr=0.7 截断到 32 个 I 帧只有 77.8%（-5.5pp），baseline 均匀 32 帧是 83.3%。I 帧时间聚类（集中在场景切换处）导致截断后覆盖度不如均匀采样。
+
+**解法**：提高 OOM 边界 → 放开 max_frames → 稀疏化不再被截断 → 中长视频可用。
+
+```
+输入视频
+  │
+  ├─[CPU] GOP 解析 + I 帧定位
+  │
+  ├─[CPU] Content-Adaptive kr（动态调 kr，保证帧数不超 max_frames）
+  │
+  ├─[CPU] I 帧解码（按批次）──┐
+  │                             │  Frame-level CPU/GPU 解耦
+  │          ┌──────────────────┘
+  │          ▼
+  │   [GPU] ViT 分块编码（编码一批 → 释放激活 → 下一批）
+  │
+  │   [GPU] Audio Encoder（~22ms 固定开销）
+  │
+  └─► [GPU] LLM Prefill → 输出 Token
+```
+
+| # | 任务 | 优先级 | 说明 |
+|---|------|:------:|------|
+| P0 | **显存碎片优化** | ⭐⭐⭐ | 三层递进：ViT 后清理 → 输入规整化 → 分块编码。初版方案见 `docs/2.15-2.16 日.md` |
+| P0 | **Content-adaptive kr** | ⭐⭐⭐ | `kr = min(max_frames / N_gops, 0.5)` 等自适应规则，避免截断 |
+| P1 | **帧级 CPU/GPU 解耦** | ⭐⭐ | CPU 解码 batch N+1 的同时 GPU 编码 batch N，降峰值+提吞吐 |
+| P2 | **Ring Buffer 流水线** | ⭐ | 完整异步预取，作为论文 future work 或加分项 |
 
 ### 论文输出
 
@@ -259,14 +300,25 @@ run_all_experiments.sh   # 一键实验脚本
 ## 待探讨问题（供 Agent 讨论）
 
 - [x] **MVBench 41.7% 失败率根因**：1-GOP 编码视频（clevrer/ssv2）→ sparse 选 0 帧 → processor 崩溃。修复：fallback 保留至少 1 帧
-- [ ] **Pareto 非单调**：kr=0.5 是峰值，kr>0.5 反而下降 → 冗余帧引入噪声？论文如何解释？
+- [x] **Pareto 非单调（已解决）**：根因是 **max_frames=32 截断 + I 帧时间聚类**。kr=0.7 时 17% 视频触及上限，32 个 I 帧的时间覆盖度不如 32 个均匀帧（同视频同帧数：I 帧 77.8% vs 均匀 83.3%，差 5.5pp）。kr=0.5 是 sweet spot：帧数不触发截断（平均 14.4 帧）且覆盖度最大化。论文表述：存在最优稀疏度，超过后 I 帧聚类反而损害覆盖度
 - [ ] **Medium 音频干扰**：video_only > baseline (+4.4pp)，统计显著性待验证
-- [ ] **M/L sparse 无效**：max_frames=32 卡死，需要帧级选择或提高 max_frames
+- [x] **M/L sparse 无效（方案已定）**：max_frames=32 限制了中长视频。解法：显存优化提高 OOM 边界 → 放开 max_frames + Content-adaptive kr 避免截断
+
+### 📱 手机讨论方向（供 Agent 探索）
+
+以下问题适合在手机上与 Agent 探讨，产出可直接用于后续开发：
+
+1. **显存优化方案设计**：初版三层递进（ViT 后清理/输入规整化/分块编码）是否足够？老师之前的顾虑（VLM 已做过类似优化）如何回应？我们的差异化：GOP 稀疏化 + 显存优化的联合系统，不是通用 VLM 优化
+2. **中长视频优化具体解法**：Content-adaptive kr 的公式设计？帧级 CPU/GPU 解耦的实现路线？如何验证效果？
+3. **论文叙事**：整体加速流水线的故事线怎么讲？四个技术点（稀疏化/显存/自适应/流水线）如何组织成连贯的贡献？Pareto 非单调的论文解释？
+4. **老师建议整合**：之前老师对显存优化的具体反馈是什么？如何把"已有工作做过"转化为"我们的系统性整合是新的"？与 Mobile-VideoGPT 的差异化？
 
 ---
 
 ## 变更日志
 
+- **[2.22 午后-2]** Pareto 非单调根因分析完成（max_frames 截断+I 帧时间聚类）。Phase 3 架构规划完成。手机讨论方向整理
+- **[2.22 午后]** Sanity Check 通过（86.1%一致率+token减54%+8题翻转对称抵消）。pipeline 无 bug，kr=0.5 零损失确认为真实现象。GPT Review concern 全部关闭。MVBench 重跑中
 - **[2.22 午前-2]** GPT 5.2 Review 完成。核心结论：(1) kr=0.5=BL 需 Sanity Check 排除 pipeline bug; (2) AV-LRM 加覆盖约束后再判断; (3) 短期收尾 move on
 - **[2.22 午前]** 1-GOP fallback 修复(c0069fc)+工作流程规范+MVBench重跑准备
 - **[2.22 AM-2]** MVBench 失败根因定位：1-GOP 编码视频→sparse 选 1 帧+音频→processor StopIteration
