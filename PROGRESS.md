@@ -280,6 +280,8 @@ run_all_experiments.sh   # 一键实验脚本
 | LLaVA-PruMerge | 融合+剪枝 visual tokens | 模型内部 vs 预处理阶段 | 待调研 |
 | **Mobile-VideoGPT** | 注意力关键帧+token剪枝 | 端侧，思路类似 | ✅ 已调研 |
 | MiniCPM-o | 端侧全模态 | 功能更全，未专注稀疏化 | 待调研 |
+| **CoPE-VideoLM** | Codec primitives (MV+残差) 替代 RGB 帧，训练 lightweight encoder | 需训练 vs 我们 training-free；单模态 vs 多模态；Stanford 2026.02 | ✅ 已调研 |
+| **Motion-Aware GOP Encoder** | GOP 内融合空间+运动信息 (CVPR 2025) | 需训练 vs training-free | ✅ 已调研 |
 
 ---
 
@@ -299,10 +301,11 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 待探讨问题（供 Agent 讨论）
 
-- [x] **MVBench 41.7% 失败率根因**：1-GOP 编码视频（clevrer/ssv2）→ sparse 选 0 帧 → processor 崩溃。修复：fallback 保留至少 1 帧
-- [x] **Pareto 非单调（已解决）**：根因是 **max_frames=32 截断 + I 帧时间聚类**。kr=0.7 时 17% 视频触及上限，32 个 I 帧的时间覆盖度不如 32 个均匀帧（同视频同帧数：I 帧 77.8% vs 均匀 83.3%，差 5.5pp）。kr=0.5 是 sweet spot：帧数不触发截断（平均 14.4 帧）且覆盖度最大化。论文表述：存在最优稀疏度，超过后 I 帧聚类反而损害覆盖度
+- [ ] **MVBench 41.7% 失败率根因**：1-GOP 编码视频（clevrer/ssv2）→ sparse 选 0 帧 → processor 崩溃。修复：fallback 保留至少 1 帧
+- [ ] **Pareto 非单调（已解决）**：根因是 **max_frames=32 截断 + I 帧时间聚类**。kr=0.7 时 17% 视频触及上限，32 个 I 帧的时间覆盖度不如 32 个均匀帧（同视频同帧数：I 帧 77.8% vs 均匀 83.3%，差 5.5pp）。kr=0.5 是 sweet spot：帧数不触发截断（平均 14.4 帧）且覆盖度最大化。论文表述：存在最优稀疏度，超过后 I 帧聚类反而损害覆盖度
 - [ ] **Medium 音频干扰**：video_only > baseline (+4.4pp)，统计显著性待验证
 - [x] **M/L sparse 无效（方案已定）**：max_frames=32 限制了中长视频。解法：显存优化提高 OOM 边界 → 放开 max_frames + Content-adaptive kr 避免截断
+- [ ] **CoPE-VideoLM 差异化定位**：Stanford 2026.02 发了 codec-aware VideoLM（arXiv 2602.13191，训练 encoder，-93% tokens，14 benchmarks 持平/超越），验证了 codec-aware 方向的可行性。我们的差异化：training-free + 端侧部署 + 多模态（视频+音频）。论文需引用并明确区分
 
 ### 📱 手机讨论方向（供 Agent 探索）
 

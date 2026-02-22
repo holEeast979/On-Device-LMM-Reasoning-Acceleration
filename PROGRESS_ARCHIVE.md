@@ -712,6 +712,8 @@ num_frames, error, pred_raw
 | **Mobile-VideoGPT** | 注意力关键帧打分+token剪枝，<1B参数 | 端侧部署，思路与AV-LRM类似（关键帧选择） | ✅ 已调研 |
 | HyperVL | 动态分辨率+双一致性学习 | 图像为主，视频支持有限 | 待调研 |
 | MiniCPM-o | 端侧全模态(vision+speech+streaming) | 功能更全，但未专注视觉稀疏化 | 待调研 |
+| **CoPE-VideoLM** | Codec primitives (MV+残差) 替代 RGB 帧，训练 lightweight encoder | 需训练 vs 我们 training-free；单模态 vs 多模态；Stanford 2026.02 | ✅ 已调研 |
+| **Motion-Aware GOP Encoder** | GOP 内融合空间+运动信息 (CVPR 2025) | 需训练 vs training-free | ✅ 已调研 |
 
 ---
 
