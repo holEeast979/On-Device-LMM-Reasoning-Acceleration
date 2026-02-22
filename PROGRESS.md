@@ -14,26 +14,38 @@
 
 ---
 
-## 当前状态（2.22 晚）
+## 当前状态（2.22 深夜）
 
-**MVBench 重跑完成，全部数据就绪。进入 Phase 3 架构扩展（Adaptive kr + 显存优化）。**
+**Layer 2 Adaptive kr 已实现并验证。Video-MME 全集实验正在跑（tmux eval），预计 2.23 凌晨完成。**
 
-- ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI + Non-inferiority）
-- ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
-- ✅ **Sanity Check 通过**（详见下方结论）— pipeline 无 bug，kr=0.5 零损失是真实现象
-- ✅ **1-GOP fallback 已修复**（`c0069fc`，smoke test 3/3 pass）
-- ✅ **GPT 5.2 Review 完成 + 问题已关闭**
-- ✅ **MVBench 重跑完成**（1-GOP 修复后全量 3 mode × 3600 题）
+### ✅ 已完成
+
+- ✅ **Layer 1 I 帧均匀选取** — kr=0.5 零损失（75.93% = Baseline），2.1x 加速
+- ✅ **Layer 2 Adaptive kr 代码** — `pipeline.py` 已实现 `kr_adaptive = min(kr, max_frames/n_valid)`，smoke test 通过（`3bb736c`）
+- ✅ **Video-MME Short 全部实验** — 6 模式 × 300 题 + Bootstrap CI + Non-inferiority + Pareto sweep
+- ✅ **MVBench 全量** — 3 mode × 3600 题（1-GOP 修复后重跑）
+- ✅ **论文图表** — Pareto 曲线图 + MVBench 按任务分析图（`tools/plot_figures.py`，输出在 `/root/autodl-tmp/results/figures/`）
+- ✅ **MV 提取 PoC** — PyAV 成功提取 8766 帧 MV，1.14ms/帧，运动 profile 清晰（`tools/mv_extraction_poc.py`）
+- ✅ **AV-LRM 坦诚评价** — 已写入 PROGRESS.md，Two-Regime 发现是独立贡献
+- ✅ **核心技术路线确认** — naive I帧主力 / Adaptive kr 解锁 M/L / Motion-Aware L3 补时序任务
+
+### 🔄 正在进行
+
+- 🔄 **Video-MME 全集 Adaptive kr 实验** — `tmux eval` 中运行
+  - 模式：`naive_iframe(kr=0.5)` + `sparse(kr=0.5)`，各 292 题（8 个视频缺失）
+  - 输出目录：`/root/autodl-tmp/results/fasteromni/videomme_adaptive_kr/`
+  - naive_iframe 已完成 ~292/292，sparse 正在跑
+  - **实验跑完后的第一件事**：按 duration (S/M/L) 分别统计准确率，对比 `videomme_full/` 旧数据
 
 ### ⬇️ 新对话 Agent 立即执行事项
 
-1. ✅ ~~修复 `pipeline.py`~~ — `c0069fc`
-2. ✅ ~~Smoke test~~ — 3/3 pass
-3. ✅ ~~GPT 5.2 Review~~ — 已完成，结论已整合
-4. ✅ ~~Sanity Check~~ — **通过**（pipeline 无 bug，详见下方）
-5. ✅ ~~MVBench 重跑~~ — 完成
-6. 🔄 **分析 MVBench 新数据 + 更新结果表**
-7. 待 Phase 3 架构扩展（Adaptive kr + 显存优化）
+1. **检查实验是否完成**：`tmux capture-pane -t eval -p | tail -20`
+2. **如果已完成**：分析 `videomme_adaptive_kr/` 结果
+   - 按 duration 分 accuracy：`python3 -c "import csv; ..."`（按 S/M/L 分组统计）
+   - 对比旧数据 `videomme_full/`：看 M/L 准确率是否提升（Adaptive kr 的核心价值）
+   - 记录 `kr_requested` vs `kr_adaptive` 触发率
+3. **如果未完成**：等待，同时可做 Layer 3 设计或论文 outline
+4. **模型迁移到 FS**：实验跑完后执行（省 ~¥4/月，步骤见变更日志 2.22 晚-6）
 
 ### Sanity Check 结论（2.22 午后）✅ 已关闭
 
@@ -197,20 +209,17 @@
 
 ## 待做工作
 
-### 当前（补实验 + 置信度）
+### 当前（Layer 2 实验 + 论文输出）
 
 | # | 任务 | 状态 | 说明 |
 |---|------|:----:|------|
-| 1 | **MVBench 全量** | ✅ 完成 | baseline 66.9%, naive 57.8%, 3.9x 加速 |
-| 2 | **Pareto naive_iframe kr sweep** | ✅ 完成 | kr=0.5 零损失（75.93%=BL），2.1x 加速 |
-| 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
-| 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
-| 5 | **MVBench 1-GOP 修复** | ✅ 完成 | `c0069fc` valid_gops≤1 时 skip_audio，smoke test 3/3 pass |
-| 5b | **MVBench 重跑** | ✅ 完成 | BL 66.9%, naive 53.6%, sparse 53.3%。详见按任务分析 |
-| 5c | **GPT 5.2 Review** | ✅ 完成 | 结论已整合，concern 已关闭 |
-| 5d | **Sanity Check** | ✅ 通过 | pipeline 无 bug，86.1%一致+token减54%+8题翻转对称抵消 |
-| 5e | **覆盖约束打分** | ⬜ 可选 | 分段top-1 或 temporal NMS，验证 AV-LRM 是否值得投入 |
-| 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
+| 1 | **Layer 2 Adaptive kr 代码** | ✅ 完成 | `3bb736c` smoke test 通过，sparse+naive 两路径一致 |
+| 2 | **Video-MME 全集 Adaptive kr** | 🔄 跑中 | naive_iframe+sparse × 292 题，tmux eval |
+| 3 | **论文图表** | ✅ 完成 | Pareto 曲线+MVBench 按任务图（`tools/plot_figures.py`） |
+| 4 | **MV 提取 PoC** | ✅ 完成 | PyAV 8766帧 MV，1.14ms/帧（`tools/mv_extraction_poc.py`） |
+| 5 | **分析 Adaptive kr 实验结果** | ⬜ 等数据 | 按 S/M/L 分 accuracy，对比旧数据看 M/L 提升 |
+| 6 | **模型迁移到 autodl-fs** | ⬜ 待做 | 省 ~¥4/月，实验跑完后执行 |
+| 7 | **Layer 3 Motion-Aware 设计** | ⬜ 下一步 | MV PoC 已验证，需设计 motion-weighted 采样公式 |
 
 ### Phase 3（架构扩展）— 整体加速流水线
 
@@ -243,8 +252,8 @@
 | 层 | 功能 | 状态 | 说明 |
 |----|------|:----:|------|
 | **L1: I 帧均匀选取** | naive_iframe 覆盖度优先 | ✅ 完成 | kr=0.5 零损失，Two-Regime 理论验证 |
-| **L2: Adaptive kr** | max_frames 硬约束，防截断 | 🔄 实现中 | GPT Prompt 已就绪（`gpt_adaptive_kr_prompt.md`） |
-| **L3: Motion-Aware 补偿** | 时序敏感任务补充 P/B 帧信息 | ⬜ 设计阶段 | 用 MV 幅度做 motion-aware 非均匀采样（见下方） |
+| **L2: Adaptive kr** | max_frames 硬约束，防截断 | ✅ 完成 | `3bb736c` 两路径一致，全集实验跑中 |
+| **L3: Motion-Aware 补偿** | 时序敏感任务补充 P/B 帧信息 | 🔄 PoC 完成 | MV 提取验证可行（1.14ms/帧），需设计采样公式 |
 
 > **L3 设计思路（P/B 帧运动向量）**：
 > - P/B 帧不存完整像素，存储 Motion Vector (MV) = 每个宏块相对参考帧的位移 (dx, dy)
@@ -264,11 +273,13 @@
 
 ### 论文输出
 
-| # | 任务 | 依赖 |
-|---|------|------|
-| 10 | Pareto 曲线图 | ✅ 数据就绪，待画图 |
-| 11 | MVBench 结果表 | ⚠️ 待重跑后更新 |
-| 12 | 论文初稿 | 待 GPT Review 后启动 |
+| # | 任务 | 状态 | 说明 |
+|---|------|:----:|------|
+| 10 | Pareto 曲线图 | ✅ 完成 | `tools/plot_figures.py` → `/root/autodl-tmp/results/figures/pareto_curve.{png,pdf}` |
+| 11 | MVBench 按任务分析图 | ✅ 完成 | 同上 → `mvbench_per_task.{png,pdf}` |
+| 12 | MV Profile 可视化 | ✅ 完成 | `tools/mv_extraction_poc.py` → `mv_profile_323v_FtWqvo.png` |
+| 13 | Video-MME 全集结果表 | ⬜ 等实验 | Adaptive kr 实验跑完后按 S/M/L 汇总 |
+| 14 | 论文初稿 | ⬜ 待启动 | 故事线已定（见下方），技术点 L1/L2 完成后可开始 |
 
 ---
 
@@ -276,7 +287,7 @@
 
 ```
 fasteromni/
-├── pipeline.py          # 推理引擎（9 种 mode，帧选择+推理解耦）
+├── pipeline.py          # 推理引擎（9 种 mode，帧选择+推理解耦，含 Adaptive kr）
 ├── eval_videomme.py     # Video-MME 评估（300 题，增量 CSV）
 ├── eval_mvbench.py      # MVBench 评估（3600 题，增量 CSV）
 ├── bootstrap_ci.py      # Bootstrap CI 统计分析
@@ -287,8 +298,16 @@ fasteromni/
 │   └── frame_decoder.py # I 帧解码
 └── phase1_archive/      # 废弃脚本
 
+tools/
+├── plot_figures.py      # 论文图表生成（Pareto + MVBench 按任务图）
+└── mv_extraction_poc.py # Motion Vector 提取 PoC（Layer 3 验证）
+
 non_inferiority.py       # Non-inferiority 统计检验
 run_all_experiments.sh   # 一键实验脚本
+
+gpt_adaptive_kr_prompt.md  # L2 Adaptive kr Codex Prompt
+gpt_pareto_plot_prompt.md  # 论文图表 Codex Prompt
+gpt_mv_extraction_prompt.md # MV 提取 Codex Prompt
 ```
 
 ---
@@ -310,6 +329,7 @@ run_all_experiments.sh   # 一键实验脚本
 | `videomme/ablation_kr_short/` | kr sweep sparse only（108×6 题） | 🔒 |
 | `mvbench/` | MVBench 全量（3 mode × 3600 题） | 🔒 |
 | `pareto_naive_iframe/` | naive_iframe kr sweep（5 kr × 108 题） | 🔒 |
+| `videomme_adaptive_kr/` | Adaptive kr 全集实验（naive+sparse × 292 题） | 🔄 写入中 |
 
 **数据集位置**：
 - Video-MME: `/root/autodl-tmp/data/Video-MME/`
@@ -448,6 +468,10 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
+- **[2.22 深夜]** PROGRESS.md 全面更新（达到新对话可直接接续）。创建对话交接 Skills（`/handoff`, `/pickup`）
+- **[2.22 晚-8]** Pareto 图修复三轮：图例移到图外、白底标签、kr=0.3 不遮红三角（`f4e19ec`）
+- **[2.22 晚-7]** 论文图表完成（`tools/plot_figures.py`）+ MV 提取 PoC 完成（`tools/mv_extraction_poc.py`）。commit `c0f688b`
+- **[2.22 晚-6]** Adaptive kr 代码 Review + Smoke test 通过（`3bb736c`）。Video-MME 全集实验启动（tmux eval）。AutoDL FS vs TMP 对比分析
 - **[2.22 晚-5]** AV-LRM 坦诚评价写入 PROGRESS.md。核心技术路线确认：naive I帧为主力，Motion-Aware L3 解决时序敏感任务，AV-LRM 作为 Two-Regime 发现保留
 - **[2.22 晚-4]** Adaptive kr GPT Prompt 完成（`gpt_adaptive_kr_prompt.md`）。稀疏化三层架构规划：L1 I帧选取(✅) → L2 Adaptive kr(🔄) → L3 Motion-Aware P/B帧补偿(⬜)
 - **[2.22 晚-3]** MVBench 重跑结果分析完成。按任务分析：7个任务严重退化（Δ>-20pp），4个可接受/反超。action_count 反超+16.4pp（baseline OOM偏差）。支持 Adaptive kr 必要性
