@@ -384,6 +384,12 @@ class SparseInferencePipeline:
             "keep_ratio_actual": keep_ratio_actual,
         }
 
+        # 当只有 1 个有效 GOP 时，音频与 1 帧视频在 processor 中可能无法对齐
+        # 自动跳过音频，避免 Qwen2.5-Omni processor 的 StopIteration
+        valid_gops_list = [sg for sg in scored_gops if sg.combined_score >= 0]
+        if len(valid_gops_list) <= 1:
+            skip_audio = True
+
         if not i_frames:
             return SelectedFrames(
                 conversation=[],
@@ -529,6 +535,11 @@ class SparseInferencePipeline:
                 preprocess_ms=preprocess_ms,
                 metadata={**metadata, "selection_error": "No frames extracted"},
             )
+
+        # 当只有 1 个有效 GOP 时，音频与 1 帧视频在 processor 中可能无法对齐
+        # 自动跳过音频，避免 Qwen2.5-Omni processor 的 StopIteration
+        if len(valid_gops) <= 1:
+            skip_audio = True
 
         # === Step 3: 音频提取 ===
         t0 = time.perf_counter()
