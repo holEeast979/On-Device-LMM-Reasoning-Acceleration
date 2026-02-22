@@ -16,7 +16,13 @@
 
 ## 当前阶段
 
-**Phase 2 Video-MME 闭环 + GPT Review 完成，进入 MVBench 接入。** 6 模式×300 题 + Bootstrap CI + 双 GPT Review（5.2/5.3）完成。**论文定位已转型**：从"AV-LRM 准确率领先" → "资源约束下可运行性 + Pareto 前沿 + 鲁棒性"。MVBench 已解压就绪（3,333 视频 × 20 任务）。待办：MVBench 评估代码 → kr 全扫 Pareto → Hybrid 策略实验。
+**Phase 2 全部完成，进入论文写作。** 两个 benchmark（Video-MME 300题 + MVBench 3600题）+ Pareto kr sweep + Bootstrap CI + Non-inferiority 全部完成。
+
+**2.22 新增实验结果**：
+- **MVBench 全量**：baseline 66.94%, sparse 57.36%, naive_iframe 57.79%（2099/3600 valid, 1501 StopIteration）
+- **Pareto naive_iframe kr sweep**：kr=0.5 零损失（75.93% = Baseline），2.1x 加速，54% token 减少
+- **Two-Regime 量化验证**：kr=0.5 naive>sparse +6.49pp, kr=0.2 sparse>naive +1.85pp, 交叉点 kr≈0.3
+- **MVBench 1-GOP 根因**：1-GOP 编码视频（clevrer/ssv2）→ 1帧+音频 → Qwen processor `next(audio_lengths)` StopIteration。修复：valid_gops≤1 时 skip_audio
 
 ### 关键发现与开放问题
 

@@ -14,14 +14,21 @@
 
 ---
 
-## 当前状态（2.22 AM）
+## 当前状态（2.22 午前）
 
-**补充实验全部完成**，进入论文写作阶段。
+**核心实验全部完成。下一步：修复 1-GOP fallback → 重跑 MVBench → GPT Review → 论文写作。**
 
-- ✅ **MVBench 全量** 完成（3 mode × 3600 题）— baseline 66.9%, sparse 57.4%, naive_iframe 57.8%
-- ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 与 Baseline 持平（75.93%）**
-- ✅ **Non-inferiority** 已完成（naive_iframe δ=3pp PASS）
-- ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI）
+- ✅ **Video-MME** 全部实验完成（6 模式 × 300 题 + Bootstrap CI + Non-inferiority）
+- ✅ **Pareto naive_iframe kr sweep** 完成（5 kr × 108 题）— **kr=0.5 零损失（75.93% = Baseline）**
+- ✅ **MVBench 全量** 完成（3 mode × 3600 题）— 但 1501/3600 失败（根因已定位）
+- 🔄 **待执行**：修复 1-GOP fallback bug → 重跑 MVBench 全量 → GPT 5.2 Review
+
+### ⬇️ 新对话 Agent 立即执行事项
+
+1. **修复 `pipeline.py`**：`_select_sparse` 和 `_select_naive` 中，当 `valid_gops <= 1` 时跳过音频（`skip_audio=True`），避免 Qwen processor StopIteration
+2. **Smoke test**：用 `video_11397.mp4`（clevrer，1-GOP）和 `166583.webm`（action_antonym）验证修复
+3. **重跑 MVBench**：3 mode × 3600 题（~4h，后台 tmux 执行）
+4. **GPT 5.2 Review**：审核完整数据 + 论文故事线
 
 ---
 
@@ -104,7 +111,9 @@
 | 2 | **Pareto naive_iframe kr sweep** | ✅ 完成 | kr=0.5 零损失（75.93%=BL），2.1x 加速 |
 | 3 | **Non-inferiority** | ✅ 完成 | naive_iframe δ=3pp PASS |
 | 4 | **Sparse@64 闭环** | ✅ 完成 | 70.4% vs BL@32 75.9%，tokens 少 54% |
-| 5 | **MVBench 1-GOP 修复** | ⬜ 待修 | 根因：1-GOP 视频选 0 帧致 processor 崩溃，需 fallback 逻辑 |
+| 5 | **MVBench 1-GOP 修复** | ⬜ **下一步** | valid_gops≤1 时 skip_audio，避免 processor StopIteration |
+| 5b | **MVBench 重跑** | ⬜ 待#5 | 修复后重跑 3 mode × 3600 题（~4h tmux） |
+| 5c | **GPT 5.2 Review** | ⬜ 待#5b | 审核完整数据 + 论文结构 + Figure 清单 |
 | 6 | **Hybrid 策略** | ⬜ 待设计 | naive_iframe 覆盖 + AV-LRM 分配剩余预算 |
 
 ### Phase 3（架构扩展）
@@ -121,8 +130,8 @@
 | # | 任务 | 依赖 |
 |---|------|------|
 | 10 | Pareto 曲线图 | ✅ 数据就绪，待画图 |
-| 11 | MVBench 结果表 | ✅ 数据就绪，待整理 |
-| 12 | 论文初稿 | 核心实验全部完成 |
+| 11 | MVBench 结果表 | ⚠️ 待重跑后更新 |
+| 12 | 论文初稿 | 待 GPT Review 后启动 |
 
 ---
 
@@ -222,7 +231,8 @@ run_all_experiments.sh   # 一键实验脚本
 
 ## 变更日志
 
-- **[2.22 AM-2]** MVBench 失败根因定位：1-GOP 编码视频→sparse 选 0 帧→processor StopIteration。非视频长度问题，是编码格式问题
+- **[2.22 午前]** MVBench 根因完整分析：1-GOP编码视频(clevrer/ssv2)→1帧+音频→Qwen processor `next(audio_lengths)` StopIteration。修复方案确定：valid_gops≤1时skip_audio。设计了 Codex prompt + Review prompt，等待执行
+- **[2.22 AM-2]** MVBench 失败根因定位：1-GOP 编码视频→sparse 选 1 帧+音频→processor StopIteration
 - **[2.22 AM]** MVBench 全量 + Pareto naive_iframe kr sweep 完成。核心发现：kr=0.5 零损失（=BL 75.93%）
 - **[2.21 PM-5]** Non-inferiority 代码验证+commit。PROGRESS.md 精简（728行→~200行），历史归档到 PROGRESS_ARCHIVE.md
 - **[2.21 PM-4]** MVBench 代码就绪+数据保护约定+Non-inferiority prompt。Sparse@64 闭环分析完成
