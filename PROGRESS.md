@@ -16,13 +16,13 @@
 
 ## 当前状态（2.24 下午）
 
-**Layer 2 Adaptive kr 实验已完成。核心发现：M/L 视频因 GOP 数量远超 64，adaptive kr 算出 K=32 与 baseline 相同，稀疏化未体现优势。需要重新设计 Layer 2 策略。**
+**Layer 2 Adaptive kr 全集实验已完成，发现 M/L 视频稀疏化失效问题（详见变更日志 2.24）。待讨论 Layer 2 重新设计方向。**
 
 ### ✅ 已完成
 
 - ✅ **Layer 1 I 帧均匀选取** — kr=0.5 零损失（75.93% = Baseline），2.1x 加速
 - ✅ **Layer 2 Adaptive kr 代码** — `pipeline.py` 已实现 `kr_adaptive = min(kr, max_frames/n_valid)`，smoke test 通过（`3bb736c`）
-- ⚠️ **Layer 2 Adaptive kr 实验结论** — M/L 视频 adaptive kr 生效但 K=32（与 baseline 相同），稀疏化未减少 token。根因：M/L 视频 n_valid=100~1000，`32/n_valid` 使 K 刚好=32。需重新设计
+- ⚠️ **Layer 2 M/L 失效** — 详见变更日志 [2.24 PM]
 - ✅ **Video-MME Short 全部实验** — 6 模式 × 300 题 + Bootstrap CI + Non-inferiority + Pareto sweep
 - ✅ **MVBench 全量** — 3 mode × 3600 题（1-GOP 修复后重跑）
 - ✅ **论文图表** — Pareto 曲线图 + MVBench 按任务分析图（`tools/plot_figures.py`，输出在 `/root/autodl-tmp/results/figures/`）
@@ -30,30 +30,9 @@
 - ✅ **AV-LRM 坦诚评价** — 已写入 PROGRESS.md，Two-Regime 发现是独立贡献
 - ✅ **核心技术路线确认** — naive I帧主力 / Adaptive kr 解锁 M/L / Motion-Aware L3 补时序任务
 
-### ✅ 已完成（2.24 新增）
-
-- ✅ **Video-MME 全集 Adaptive kr 实验** — 292 题 × 2 模式，已完成
-  - 输出目录：`/root/autodl-tmp/results/fasteromni/videomme_adaptive_kr/`
-  - **结果**：
-    - naive_iframe: overall 61.3% | Short 77.0% | Medium 60.0% | Long 47.1%
-    - sparse: overall 59.7% | Short 70.4% | Medium 61.1% | Long 47.1%
-  - **关键发现**：M/L 视频 vistok ≈ 10737（与 baseline 相同），adaptive kr 未减少 token
-  - **根因分析**：M/L 视频 n_valid=100~1000，`kr_adaptive = min(0.5, 32/n_valid)` → K=32，与 baseline 帧数相同
-  - **诊断验证**：实际跑 3 个视频确认 — 152 GOPs→K=32, 23 GOPs→K=12, 983 GOPs→K=32
-  - **结论**：当前 adaptive kr 的 "防截断" 设计在 max_frames=32 下无法让 M/L 视频受益于稀疏化。需要新策略
-
-### 🔴 待解决：Layer 2 M/L 视频稀疏化失效
-
-**问题**：M/L 视频 I 帧数远超 max_frames，adaptive kr 将 K 压到 32 = baseline 帧数，稀疏化无优势
-
-**可能方向**：
-1. **提高 max_frames**（64/128）+ 显存优化（ViT 后清理/分块编码）→ 稀疏化在更大帧预算下发挥作用
-2. **降低 K + 提升选帧质量** → 用更少帧（如 16-20）但更精准的 I 帧，靠信息密度弥补帧数减少
-3. **混合策略** → Short 用 Layer 1（已验证零损失），M/L 用不同的帧预算策略
-
 ### 🔄 正在进行
 
-- 🔄 **Layer 2 重新设计** — 待 East Hole 回来讨论方向
+- 🔄 **Layer 2 M/L 策略重新设计** — 待讨论方向（详见变更日志 [2.24 PM]）
 
 ### ⬇️ 下一步
 
@@ -482,6 +461,25 @@ gpt_mv_extraction_prompt.md # MV 提取 Codex Prompt
 ---
 
 ## 变更日志
+
+### [2.24 PM] Adaptive kr 全集实验完成 + M/L 稀疏化失效问题（Jarvis 排查）
+
+- **实验结果**（`videomme_adaptive_kr/`，292 题 × 2 模式）：
+  - naive_iframe: overall 61.3% | Short 77.0% | Medium 60.0% | Long 47.1%
+  - sparse: overall 59.7% | Short 70.4% | Medium 61.1% | Long 47.1%
+- **关键发现**：M/L 视频 vistok ≈ 10737（与 baseline 完全相同），adaptive kr 未减少 token
+- **根因**（Jarvis 诊断确认）：
+  - M/L 视频 n_valid=100~1000（GOP 数量远超 64）
+  - `kr_adaptive = min(0.5, 32/n_valid)` → K = ceil(n_valid * kr_adaptive) = 32
+  - 选出 32 个 I 帧 = baseline 的 32 帧，稀疏化无优势
+  - 诊断验证：152 GOPs→K=32, 23 GOPs→K=12, 983 GOPs→K=32
+  - 代码逻辑本身无 bug，K ≤ max_frames 是数学保证的，硬截断（L377）未触发
+- **结论**：adaptive kr 的 "防截断" 设计在 max_frames=32 下无法让 M/L 视频受益于稀疏化
+- **待讨论方向**：
+  1. 提高 max_frames（64/128）+ 显存优化 → 稀疏化在更大帧预算下发挥作用
+  2. 降低 K + 提升选帧质量 → 用更少帧但更精准的 I 帧
+  3. 混合策略 → Short 用 Layer 1，M/L 用不同帧预算策略
+
 
 - **[2.22 深夜]** PROGRESS.md 全面更新（达到新对话可直接接续）。创建对话交接 Skills（`/handoff`, `/pickup`）
 - **[2.22 晚-8]** Pareto 图修复三轮：图例移到图外、白底标签、kr=0.3 不遮红三角（`f4e19ec`）
