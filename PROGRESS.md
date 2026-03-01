@@ -480,6 +480,12 @@ gpt_mv_extraction_prompt.md # MV 提取 Codex Prompt
   2. 降低 K + 提升选帧质量 → 用更少帧但更精准的 I 帧
   3. 混合策略 → Short 用 Layer 1，M/L 用不同帧预算策略
 
+- **外部反馈（3.1 讨论）**：
+  - Video-MME 时长定义：Short < 2min；Medium 4~15min；Long 30~60min
+  - Long 视频发现：GOP 数量极大（n_valid 可达 100~1000+），在 max_frames=32 下 K 被锁定到 32，冗余极低，稀疏化前提不成立；I 帧质量提升无法弥补覆盖不足
+  - MVBench 发现：当 GOP 很小/很少时，kr=0.5 会过度稀疏（avg_num_frames≈2.98，acc 66.9%→53.6%），kr 需要调大以保留更多帧
+  - 策略启发：kr 应做 content-adaptive + GOP-count-adaptive，避免一刀切
+
 
 - **[2.22 深夜]** PROGRESS.md 全面更新（达到新对话可直接接续）。创建对话交接 Skills（`/handoff`, `/pickup`）
 - **[2.22 晚-8]** Pareto 图修复三轮：图例移到图外、白底标签、kr=0.3 不遮红三角（`f4e19ec`）
