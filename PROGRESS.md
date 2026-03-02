@@ -34,11 +34,19 @@
 
 - 🔄 **Layer 2 M/L 策略重新设计** — 待讨论方向（详见变更日志 [2.24 PM]）
 
-### ⬇️ 下一步
+### ⬇️ 下一步（3.2 讨论后）
 
-1. **讨论 Layer 2 M/L 策略** — 提高 max_frames vs 降低 K vs 混合策略
-2. **模型迁移到 FS** — 省 ~¥4/月
-3. **Layer 3 Motion-Aware 设计** — P/B 帧补偿时序敏感任务
+**P0（先做）**
+1. **MVBench 少 GOP 退化修复** — 增加低 `n_valid` 边界策略（避免 kr=0.5 过度稀疏到 ~3 帧）
+2. **补齐 sparse vs baseline 的 latency/token 对比** — 作为论文“加速贡献”主证据
+
+**P1（随后）**
+3. **Video-MME alpha 稳健性复核** — 强调区间稳定，不按单一数据集单点最优定参（默认建议 `alpha=0.3`）
+4. **Short 场景误差分析** — 定位 70.4% vs 77.0% 的主要掉点题型
+
+**P2（可选/Future Work）**
+5. **PTBG（P/B 帧门控）小规模验证** — `I-only / I+P/B always / I+P/B gated` 三配置对比
+6. **M/L 边界分析写作** — Medium/Long 结果保留上报，但作为 scope/limitation 说明，不再硬攻提分
 
 ### Sanity Check 结论（2.22 午后）✅ 已关闭
 
