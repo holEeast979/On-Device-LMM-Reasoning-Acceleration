@@ -485,6 +485,9 @@ gpt_mv_extraction_prompt.md # MV 提取 Codex Prompt
   - Long 视频发现：GOP 数量极大（n_valid 可达 100~1000+），在 max_frames=32 下 K 被锁定到 32，冗余极低，稀疏化前提不成立；I 帧质量提升无法弥补覆盖不足
   - MVBench 发现：当 GOP 很小/很少时，kr=0.5 会过度稀疏（avg_num_frames≈2.98，acc 66.9%→53.6%），kr 需要调大以保留更多帧
   - 策略启发：kr 应做 content-adaptive + GOP-count-adaptive，避免一刀切
+  - Alpha 讨论结论：避免按单一数据集“最高点”定参，改为稳健区间定参；当前消融波动约 2%，默认建议 alpha=0.3（保留双模态叙事）
+  - PTBG 定位：P/B 帧门控保留方向合理，但工程改动中等且可能抬高 token 成本；正文维持 I-only，PTBG 作为 Future Work 或附录小规模验证
+  - 执行优先级：P0 先做 MVBench 少 GOP 边界修复 + sparse vs baseline 的 latency/token 对比；M/L 不再硬攻提分，转为边界与限制分析
 
 
 - **[2.22 深夜]** PROGRESS.md 全面更新（达到新对话可直接接续）。创建对话交接 Skills（`/handoff`, `/pickup`）
