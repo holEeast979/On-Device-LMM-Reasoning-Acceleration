@@ -43,6 +43,7 @@
 **P1（随后）**
 3. **Video-MME alpha 稳健性复核** — 强调区间稳定，不按单一数据集单点最优定参（默认建议 `alpha=0.3`）
 4. **Short 场景误差分析** — 定位 70.4% vs 77.0% 的主要掉点题型
+5. **跨模型验证（Qwen3.5）** — 在同 pipeline 上补 `Qwen3.5-4B`（必做）+ `Qwen3.5-9B`（可选）快速对照（baseline / naive_iframe@0.5 / adaptive_kr），验证 training-free 方法的可迁移性
 
 **P2（可选/Future Work）**
 5. **PTBG（P/B 帧门控）小规模验证** — `I-only / I+P/B always / I+P/B gated` 三配置对比
@@ -85,6 +86,8 @@
 ## 项目背景
 
 研究 **Qwen2.5-Omni-7B** 推理加速，构建**端侧多模态推理加速架构**。
+
+> 3.3 决策：`Qwen2.5-Omni-7B` 继续作为主线基座，不替换；新增 `Qwen3.5-4B`（必做）与 `Qwen3.5-9B`（可选）进行跨模型迁移验证。
 
 **三大技术支柱**：
 1. ✅ **GOP 级 token 稀疏化**（AV-LRM 打分 + 帧选择）← 已完成
@@ -469,6 +472,15 @@ gpt_mv_extraction_prompt.md # MV 提取 Codex Prompt
 ---
 
 ## 变更日志
+
+### [3.3] 模型扩展决策：保留 Omni 主线 + 增补 Qwen3.5 跨模型验证
+
+- **结论**：`Qwen2.5-Omni-7B` 不换，继续作为主实验基座（保证已有结果连续性与论文叙事稳定）
+- **新增模型计划**：
+  - `Qwen3.5-4B`：**必做**（资源受限部署主目标）
+  - `Qwen3.5-9B`：**可选**（时间允许时补，用于更强小模型上界对照）
+- **实验配置（快速筛查）**：`baseline / naive_iframe(kr=0.5) / adaptive_kr` 三模式，优先 Video-MME 子集 + MVBench 小样本，记录 accuracy / visual tokens / latency / peak memory
+- **论文收益**：将贡献从“单模型优化”扩展到“跨模型可迁移的 training-free 加速”，降低审稿人对模型绑定性的质疑
 
 ### [2.24 PM] Adaptive kr 全集实验完成 + M/L 稀疏化失效问题（Jarvis 排查）
 
