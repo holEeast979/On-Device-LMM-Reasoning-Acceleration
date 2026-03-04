@@ -200,12 +200,28 @@
 
 ## Phase 4: 技术点 1 收尾（2.24 - 现在）
 
-### 当前卡点
-**问题**：Layer 2 Adaptive kr 在 M/L 视频上"数学上不截断，但效果上等价 baseline@32"  
-**待讨论方向**：
-1. 提高 max_frames（64/128）+ 显存优化 → 稀疏化在更大帧预算下发挥作用
-2. 降低 K + 提升选帧质量 → 用更少但更精准的 I 帧
-3. 混合策略 → Short 用 Layer 1，M/L 用不同帧预算策略
+### 节点 4.1 — M/L 视频边界探索
+**时间**：2.24  
+**问题**：Adaptive kr 在 M/L 视频上是否有效？能否通过动态调整 kr 解决 M/L 稀疏化失效问题？  
+**动作**：Adaptive kr 全集实验（292 题 × 2 模式：naive_iframe + sparse）  
+**关键证据**：
+- **Medium**: naive_iframe 和 sparse 的 vistok **完全相同**（11052±1810）
+  - naive_iframe: 60.0% | sparse: 61.1%（+1.1pp）
+  - Baseline: 56.7%（**Adaptive kr 反超 baseline +3.3pp**）
+- **Long**: naive_iframe 和 sparse 的 vistok **完全相同**（10737±2185）
+  - naive_iframe: 47.1% | sparse: 47.1%（完全相同）
+  - Baseline: 49.4%（-2.3pp）
+- **根因诊断**：M/L 视频 n_valid=100~1000，`kr_adaptive = min(0.5, 32/n_valid)` → K=32，选出 32 个 I 帧 = baseline 的 32 帧，稀疏化被"数学上限"锁死
+**决策**：
+- **方法边界量化**：M/L 视频在 max_frames=32 下稀疏化无效，不是方法问题，而是硬件约束
+- **意外发现**：Medium 上 Adaptive kr 反超 baseline +3.3pp，说明 I 帧选择在中等视频上不劣于均匀采样
+- **论文定位**：M/L 不在端侧研究 scope（文献支撑：端侧模型普遍评估 10-120s），作为 limitation 说明并指向技术点 2 必要性
+
+### 当前卡点（已解决）
+**原问题**：Layer 2 Adaptive kr 在 M/L 视频上"数学上不截断，但效果上等价 baseline@32"  
+**解决方案**：
+- **短期**：M/L 不在 scope，聚焦 Short 视频（10-120s）
+- **长期**：技术点 2（显存优化）提高 max_frames 上限，M/L 稀疏化才能生效
 
 ### P0 待办（先做）
 1. **MVBench 少 GOP 退化修复** — 增加低 `n_valid` 边界策略（避免 kr=0.5 过度稀疏到 ~3 帧）
@@ -232,9 +248,10 @@
 **预期效果**：max_frames 从 32 → 64+，M/L 视频 Adaptive kr 不再被截断，稀疏化策略发挥作用
 
 **与技术点 1 的联动**：
-- 显存优化提高 max_frames 上限
-- Adaptive kr 自动适配新上限
-- M/L 视频保留更多高分帧，覆盖度与精准度兼顾
+- **M/L 实验量化了 max_frames=32 瓶颈**：Medium/Long 的 vistok 完全相同（11052/10737），稀疏化被锁死
+- 显存优化提高 max_frames 上限（32 → 64+）
+- Adaptive kr 自动适配新上限，M/L 视频可以选择更多高质量 I 帧
+- 预期效果：M/L 视频在保持准确率的同时实现加速（类似 Short 的 kr=0.5 零损失）
 
 **待探索问题**：
 - [ ] 显存优化的实际收益（能提升多少 max_frames？）
@@ -290,6 +307,25 @@
 **核心卖点**：codec-aware、training-free、系统性整合、端侧多模态
 
 **与 CoPE-VideoLM 的区分**：CoPE 训练 encoder 走学术路线（-93% tokens 但需要预训练+微调），我们不改模型走部署路线（即插即用，适合端侧）
+
+### 不同场景的组合策略（灵活部署）
+
+**核心理念**：系统性不是"所有场景都用全部技术点"，而是"根据场景需求灵活组合技术点"
+
+| 场景 | 技术点组合 | 理由 | 预期效果 |
+|------|-----------|------|---------|
+| **单视频推理（Short）** | 技术点 1 | Ring Buffer 无收益（无下一个视频可预取） | kr=0.5 零损失，2.1x 加速 |
+| **单视频推理（M/L）** | 技术点 1 + 2 | 显存优化解锁 M/L 稀疏化 | max_frames 32→64+，M/L 可加速 |
+| **批量推理服务** | 技术点 1 + 2 + 3 | 流水线并行隐藏预处理延迟 | 吞吐量提升（CPU/GPU 并行） |
+| **极低延迟要求** | 仅技术点 1 | 显存优化和 Ring Buffer 有额外开销 | 最小化延迟（2x 加速） |
+| **极低预算（kr≤0.2）** | 技术点 1（AV-LRM） | Two-Regime 理论：relevance-dominant | 3.7x 加速，AV-LRM 占优 |
+
+**Pareto 前沿**：不同组合在 accuracy-efficiency-memory 三维空间的权衡
+- 技术点 1：accuracy vs efficiency（Pareto 曲线已验证）
+- 技术点 1+2：accuracy vs memory（max_frames 上限提升）
+- 技术点 1+2+3：efficiency vs throughput（批量场景吞吐量）
+
+**论文价值**：体现系统的适应性和实用性，不削弱系统性，反而增强
 
 ---
 
