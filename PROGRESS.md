@@ -12,9 +12,9 @@
 ---
 
 ## 当前阶段
-**技术点 1 收尾 → 论文写作准备**
+**技术点 1（GOP 级 token 稀疏化）收尾中**
 
-核心实验已全部完成（Video-MME 300题 + MVBench 3600题 + Pareto sweep + Bootstrap CI + Modality baselines + Adaptive kr 边界实验）。剩余 P0 收尾后进入论文写作，同时推进 content-adaptive 参数调整。
+核心实验已全部完成（Video-MME 300题 + MVBench 3600题 + Pareto sweep + Bootstrap CI + Modality baselines + Adaptive kr 边界实验）。剩余 P0 收尾后推进技术点 2/3，三个技术点全部完成后开始论文写作。
 
 **研究定位**：聚焦 Short 视频（10-120s），M/L 不在 scope（max_frames=32 硬瓶颈，稀疏化无效）。
 
@@ -107,7 +107,8 @@
 - [ ] **Content-adaptive 参数调整**：根据视频内容动态调整 kr/alpha（与 Two-Regime 理论衔接）
 - [ ] **Short 场景误差分析**：定位 sparse 70.4% vs naive 77.0% 的掉点题型
 - [ ] **跨模型验证**：Qwen3.5-4B（必做）+ Qwen3.5-9B（可选），验证 training-free 可迁移性
-- [ ] **论文写作**：整理实验数据，开始撰写
+- [ ] **技术点 2：显存碎片优化**：ViT 后清理激活值 + 分块 Encoding，解锁 M/L 视频
+- [ ] **技术点 3：Ring Buffer 流水线**：CPU/GPU 异步预取，批量场景吞吐优化
 
 ### 已完成（从旧待办迁移）
 - [x] Video-MME 完整评估 (300 题, baseline+sparse+naive)
