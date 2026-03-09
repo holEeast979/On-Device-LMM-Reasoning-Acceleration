@@ -248,15 +248,19 @@ class SparseInferencePipeline:
         """统计 visual / audio / total tokens"""
         if "input_ids" not in inputs:
             return 0, 0, 0
-        from utils.profiling_utils import get_mm_token_ids_from_tokenizer
-        tok = getattr(self._proc, "tokenizer", self._proc)
-        mm = get_mm_token_ids_from_tokenizer(tok)
+        
         ids = inputs["input_ids"][0]
-        vision_ids = set(int(x) for x in mm.get("vision_special_token_ids", []) or [])
-        audio_ids = set(int(x) for x in mm.get("audio_special_token_ids", []) or [])
-        visual = sum(int((ids == tid).sum().item()) for tid in vision_ids) if vision_ids else 0
-        audio = sum(int((ids == tid).sum().item()) for tid in audio_ids) if audio_ids else 0
+        
+        # Qwen2.5-Omni 的 special token IDs（硬编码，避免依赖 profiling_utils）
+        # Vision: <|vision_bos|>=151652, <|vision_eos|>=151653, <|vision_pad|>=151654, <|IMAGE|>=151655, <|VIDEO|>=151656
+        # Audio: <|AUDIO|>=151646, <|audio_bos|>=151647, <|audio_eos|>=151648
+        vision_ids = {151652, 151653, 151654, 151655, 151656}
+        audio_ids = {151646, 151647, 151648}
+        
+        visual = sum(int((ids == tid).sum().item()) for tid in vision_ids)
+        audio = sum(int((ids == tid).sum().item()) for tid in audio_ids)
         total = int(ids.shape[-1])
+        
         return visual, audio, total
 
     def _run_inference(

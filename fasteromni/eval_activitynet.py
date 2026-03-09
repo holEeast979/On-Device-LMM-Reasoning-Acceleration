@@ -356,31 +356,8 @@ def load_activitynet_samples(max_videos: int = 0) -> List[ActivityNetSample]:
 
 # ── 答案匹配 ──────────────────────────────────────────────
 
-def normalize_answer(text: str) -> str:
-    """标准化答案：小写 + 去空格"""
-    return text.strip().lower()
-
-
-def match_answer(pred: str, gt: str) -> bool:
-    """
-    匹配预测答案和真实答案。
-
-    策略：
-    1. 精确匹配（标准化后）
-    2. 如果 gt 是 pred 的子串（处理 "yes, ..." → "yes" 的情况）
-    """
-    pred_norm = normalize_answer(pred)
-    gt_norm = normalize_answer(gt)
-
-    # 精确匹配
-    if pred_norm == gt_norm:
-        return True
-
-    # 子串匹配（gt 在 pred 中）
-    if gt_norm in pred_norm:
-        return True
-
-    return False
+# 使用改进的答案匹配逻辑（词干化 + Jaccard 相似度）
+from fasteromni.answer_matching import match_answer
 
 
 # ── 单条评估 ──────────────────────────────────────────────
