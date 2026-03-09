@@ -116,6 +116,7 @@ def select_gops(
     scored_gops: List[ScoredGOP],
     keep_ratio: float = 0.5,
     variance_threshold: float = 0.05,
+    min_frames: int = 1,
 ) -> List[ScoredGOP]:
     """
     根据打分结果选择 GOP。
@@ -129,6 +130,7 @@ def select_gops(
         scored_gops: 打分后的 GOP 列表
         keep_ratio: 保留比例 (0, 1]
         variance_threshold: 方差阈值
+        min_frames: 最小保留 GOP 数（兜底，防止短视频帧数过少）
 
     Returns:
         原始 scored_gops 列表（updated .selected 字段），按时间顺序
@@ -139,7 +141,8 @@ def select_gops(
     if not valid_indices:
         return scored_gops
 
-    K = max(1, math.ceil(len(valid_indices) * keep_ratio))
+    K = max(min_frames, math.ceil(len(valid_indices) * keep_ratio))
+    K = min(K, len(valid_indices))
 
     # 获取有效 GOP 的分数
     valid_scores = [scored_gops[i].combined_score for i in valid_indices]
