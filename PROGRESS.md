@@ -207,6 +207,79 @@
 - **[3.9] 研究 Scope 确认**：10s-180s 短视频（Video-MME Short + ActivityNet-QA），对齐同方向论文
 - **[3.2] M/L 放弃**：稀疏化在 M/L 基本失效，论文不再 claim 15min+ 有效性
 
+
+## GPT Code Review 发现的问题（3.11）
+
+> **审查范围**：sparse.py, gop_parser.py, audio_energy.py, pipeline.py, eval 脚本
+> **核心结论**：AV-LRM 链路存在多个致命问题，打分在挑"画面复杂、声音大"的段，而不是"对答题关键"的段
+
+### P0 问题（致命，必须修复）
+
+**P0-1: 方差门控阈值过低（0.02 vs 0.05）**
+- 问题：99% 视频被判定为"高方差"，几乎全走 top_k
+- 证据：36 个视频中，threshold=0.02 时 33 个走 top_k（92%），threshold=0.05 时仅 6 个走 top_k（17%）
+- 代码：pipeline.py:363, pipeline.py:917 用 0.02，sparse.py:133 默认 0.05 被覆盖
+- 修复：改为 0.05 或用验证集分位数定门槛
+
+**P0-2: top_k/stratified_top_k 不保头尾**
+- 问题：丢失视频开头和结尾，伤害时序任务（OCR、Counting、Needle）
+- 证据：33 个 top_k 视频中，23 个（70%）没保住开头，10 个（30%）没保住结尾
+- 代码：sparse.py:178-189 stratified_top_k 不保证选中首尾 GOP
+- 修复：强制保留第一个和最后一个有效 GOP，剩下 K-2 个再做分段选高分
+
+**P0-3: 音频喂给模型时和选帧不匹配（音画错位）**
+- 问题：画面抽样了，音频还在喂完整前缀，模型收到不匹配的多模态输入
+- 证据：pipeline.py:463-470 音频截取 [0, max_end]，不是选中 GOP 对应的音频片段
+- 修复：短期保留最后一个 GOP 别砍尾音频，中期要么喂全音频要么做音频切片拼接
+
+### P1 问题（重要，建议修复）
+
+**P1-4: min_gop_frames 参数被偷偷覆盖**
+- 问题：传入 min_gop_frames=10，实际用 adaptive_min_gop = max(2, median×0.5)，平均 39.8，最大 120
+- 证据：某视频 31 帧 / 1.24 秒的 GOP 被阈值 50 过滤掉
+- 代码：pipeline.py:385-388
+- 修复：用传入的 min_gop_frames 或改成显式开关并落盘到 CSV
+
+**P1-5: 打分逻辑不"懂题"，更像"复杂度分数"**
+- 问题：视觉分数只看 i_frame_size（画面复杂度），音频只看 RMS（声音大小），不代表语义重要性
+- 证据：sparse 69.4% < naive_iframe 75.9%，说明"用了打分"反而不如"不打分"
+- 代码：sparse.py:75, audio_energy.py:101
+- 修复：视觉改成 log1p(i_frame_size / num_frames)，音频换成 VAD / ASR token 密度
+
+**P1-6: 按 GOP 个数分段，不是按时间分段**
+- 问题：高方差视频 GOP 长短差异大，按索引分段失真
+- 证据：keep_ratio_actual=0.5 但 frame_keep_ratio=0.61，说明"保留一半 GOP"≠"保留一半时间"
+- 代码：sparse.py:183, sparse.py:199
+- 修复：按时间轴分段，每段再挑分数最高的 GOP
+
+### P2 问题（次要，影响分析）
+
+**P2-7: 元数据没落盘到 CSV**
+- 问题：selection_strategy、score_variance、kr_adaptive、adaptive_min_gop 只能从字符串解析
+- 代码：eval_videomme.py:425, eval_videomme.py:571
+- 修复：加这些字段到 EvalRecord 和 CSV 头
+
+### 修复优先级
+
+**立即修复（P0，20 分钟）**：
+1. 方差阈值 0.02 → 0.05
+2. stratified_top_k 强制保头尾
+3. 音频对齐
+
+**建议修复（P1，20 分钟）**：
+4. 恢复 min_gop_frames 参数
+5. 按时间分段
+6. 补充元数据到 CSV
+
+**暂缓修复（P1-5，1-2 天）**：
+7. 重新设计打分特征
+
+### 预期修复效果
+
+- **乐观**：72-74%（接近 naive_iframe 75.93%）
+- **保守**：70-72%（比当前 69.44% 有提升）
+- **决策点**：≥74% 继续修复打分逻辑，70-74% 放弃 AV-LRM 转技术点 2/3，<70% 深入分析
+
 ## 待探讨问题
 - [ ] **AV-LRM 打分逻辑根因分析**：I 帧码率是否能代表信息密度？音频能量是否有效？归一化是否正确？
 - [ ] **方差门控阈值**：0.05 是否合理？是否应该动态调整？

@@ -546,3 +546,76 @@ on medium videos.
 - **主实验**：Video-MME Short (11s-2min) + ActivityNet-QA (30-180s)
 - **Limitation**：MVBench (2-10s) + Video-MME Medium (4-15min) + Long (30-60min)
 - **依据**：端侧多模态推理加速同方向论文普遍聚焦 10s-180s 短视频
+## Phase 6.6 — GPT Code Review：发现 AV-LRM 链路的致命问题
+
+**时间**：3.11
+**问题**：adaptive v2/v3 均未超越 naive_iframe，需要深入分析代码逻辑是否有问题
+**动作**：用 GPT-4 对核心代码进行全面审查（sparse.py, gop_parser.py, audio_energy.py, pipeline.py, eval 脚本）
+
+**GPT 核心结论**：
+> AV-LRM 链路存在多个致命问题，打分在挑"画面复杂、声音大、看起来热闹"的段，而不是挑"对答题最关键"的段。叠加"方差门控几乎总走 top_k""top_k 不保头尾""音频按前缀截断不对齐"这三刀，导致高方差视频比低方差视频更容易翻车。
+
+**发现的 7 个问题**：
+
+### P0 问题（致命，必须修复）
+
+**P0-1: 方差门控阈值过低（0.02 vs 0.05）**
+- 问题：99% 视频被判定为"高方差"，几乎全走 top_k，"自适应"名存实亡
+- 证据：36 个视频中，threshold=0.02 时 33 个走 top_k（92%），threshold=0.05 时仅 6 个走 top_k（17%）
+- 代码位置：pipeline.py:363, pipeline.py:917 用 0.02，sparse.py:133 默认 0.05 被覆盖
+
+**P0-2: top_k/stratified_top_k 不保头尾**
+- 问题：丢失视频开头和结尾，伤害时序任务（OCR、Counting、Needle）
+- 证据：33 个 top_k 视频中，23 个（70%）没保住开头，10 个（30%）没保住结尾，最差的时间覆盖只有 82.8%
+- 代码位置：sparse.py:178-189 stratified_top_k 不保证选中首尾 GOP
+
+**P0-3: 音频喂给模型时和选帧不匹配（音画错位）**
+- 问题：画面抽样了，音频还在喂完整前缀，模型收到不匹配的多模态输入
+- 证据：pipeline.py:463-470 音频截取 [0, max_end]，不是选中 GOP 对应的音频片段
+- 例子：选了 GOP 2、5、8，画面只有这 3 个，但音频是 GOP 0-8 的完整前缀
+
+### P1 问题（重要，建议修复）
+
+**P1-4: min_gop_frames 参数被偷偷覆盖**
+- 问题：传入 min_gop_frames=10，实际用 adaptive_min_gop = max(2, median×0.5)，平均 39.8，最大 120
+- 证据：某视频 31 帧 / 1.24 秒的 GOP 被阈值 50 过滤掉
+- 代码位置：pipeline.py:385-388
+
+**P1-5: 打分逻辑不"懂题"，更像"复杂度分数"**
+- 问题：视觉分数只看 i_frame_size（画面复杂度），音频只看 RMS（声音大小），不代表语义重要性
+- 证据：sparse 69.4% < naive_iframe 75.9%，说明"用了打分"反而不如"不打分"
+- 代码位置：sparse.py:75, audio_energy.py:101
+
+**P1-6: 按 GOP 个数分段，不是按时间分段**
+- 问题：高方差视频 GOP 长短差异大，按索引分段失真
+- 证据：keep_ratio_actual=0.5 但 frame_keep_ratio=0.61，说明"保留一半 GOP"≠"保留一半时间"
+- 代码位置：sparse.py:183, sparse.py:199
+
+### P2 问题（次要，影响分析）
+
+**P2-7: 元数据没落盘到 CSV**
+- 问题：selection_strategy、score_variance、kr_adaptive、adaptive_min_gop 只能从字符串解析
+- 代码位置：eval_videomme.py:425, eval_videomme.py:571
+
+**决策**：
+1. **立即修复 P0 + P1-4 + P1-6 + P2-7**（预计 40 分钟：改代码 20 分钟 + 跑实验 1-2 小时）
+2. **验证效果**：
+   - 乐观预期：72-74%（接近 naive_iframe 75.93%）
+   - 保守预期：70-72%（比当前 69.44% 有提升）
+3. **决策点**：
+   - ≥74%：继续修复 P1-5（打分逻辑），争取超越 naive_iframe
+   - 70-74%：放弃 AV-LRM，转向技术点 2/3 开发
+   - <70%：说明还有其他问题，需要更深入分析
+4. **P1-5（打分逻辑）暂缓修复**：需要 1-2 天重新设计特征 + 实验验证，时间成本高
+
+**关键洞察**：
+- GPT 的分析揭示了 AV-LRM 失败的根本原因：**打分代理不"懂题"**
+- I 帧码率 = 画面复杂度（纹理多、镜头切换快），不等于语义重要性
+- 音频 RMS = 声音大小（背景音乐、环境噪音），不等于信息量
+- 这解释了为什么 naive_iframe（不打分，均匀选）反而比 sparse（打分选）准确率更高
+
+**论文写作启示**：
+- AV-LRM 的失败不是"方法不好"，而是"特征选错了"
+- 可以在论文中坦诚讨论：codec-level 特征（I 帧码率、音频 RMS）不足以代表语义重要性
+- 未来工作：需要 content-aware 特征（场景切换检测、语音识别、OCR 等）
+- 这为 Future Work 提供了明确方向
