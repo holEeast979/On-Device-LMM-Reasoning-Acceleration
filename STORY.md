@@ -368,3 +368,181 @@
 - kr=0.5: naive 75.93% >> sparse 69.44%（+6.49pp，coverage-dominant）
 - kr=0.2: sparse 70.37% > naive 68.52%（+1.85pp，relevance-dominant）
 
+
+---
+
+## Phase 5: 研究 Scope 确认与论文写作指导（3.9）
+
+### 节点 5.1 — 研究 Scope 最终确认
+
+**时间**：3.9
+**问题**：MVBench 和 Video-MME M/L 的结果该如何在论文中使用？是否浪费了？
+**调研结论**：
+- Video-MME 官方定义：Short (11s-2min, 平均 80.8s) / Medium (4-15min, 平均 8.7min) / Long (30-60min, 平均 41.2min)
+- 同方向端侧多模态推理加速论文（FreeVA, MMEdge）普遍使用 ActivityNet-QA / MSVD / MSRVTT，时长范围 10s-180s，**不评估超长视频**
+- ActivityNet-QA：30s-180s，8000+ 样本，在 AutoDL 上已有数据
+
+**决策**：
+- **主实验 scope**：Video-MME Short (11s-2min) + ActivityNet-QA (30-180s)，对齐端侧场景典型视频长度
+- **MVBench (2-10s)**：作为 Limitation（极短视频，GOP 太少）
+- **Video-MME M/L (4-60min)**：作为 Limitation（max_frames 限制，稀疏化被截断）
+
+**数据没有浪费**：Limitation 实验是有价值的，展示方法边界比只报正面结果更可信。
+
+---
+
+### 节点 5.2 — MVBench 和 M/L 结果的论文写法
+
+#### MVBench (3600 题，2-10s 极短视频) → Limitation 章节
+
+**核心论点**：GOP 级稀疏化不适合极短视频，这是 GOP 粒度本身的结构性限制。
+
+**写法模板**（Limitation / Discussion 章节）：
+
+```
+Our method targets short videos (10s-180s) aligned with typical edge device scenarios.
+For extremely short videos (< 10s, e.g., MVBench), GOP-level sparsification degrades:
+- Baseline: 66.94% | naive_iframe (kr=0.5): 53.59% (−13.35pp)
+- 7/18 task categories show severe degradation (Δ > −20pp)
+
+Root cause: With only 4-5 GOPs per video, kr=0.5 leaves ~3 frames,
+causing severe temporal information loss. Adaptive GOP filtering mitigates
+but cannot fully resolve the fundamental constraint of insufficient GOPs.
+
+Future work: Frame-level (rather than GOP-level) sparsification would be
+more appropriate for < 10s videos.
+```
+
+**价值体现**：
+1. 主动说明失效场景，增强可信度（审稿人认可诚实的方法边界分析）
+2. 对比数据真实（3600 题，结果可信），不是随口说说
+3. 为 Future Work 提供具体方向（帧级稀疏化）
+
+---
+
+#### Video-MME Medium/Long (600 题，4-60min) → Limitation 章节
+
+**核心论点**：max_frames=32 是当前硬件约束下的系统性限制，稀疏化在此约束下被截断，引出技术点 2。
+
+**写法模板**（Limitation + Future Work）：
+
+```
+On longer videos (Video-MME Medium: 4-15min, Long: 30-60min), GOP-level sparsification
+becomes ineffective under the max_frames=32 constraint:
+
+| Method      | Medium Acc | Medium Tokens | Long Acc | Long Tokens |
+|-------------|-----------|--------------|----------|-------------|
+| Baseline@32 | 56.67%    | 11,082       | 49.41%   | 10,558      |
+| Sparse@32   | 61.11%    | 11,052       | 49.02%   | 10,737      |
+| Naive@32    | 60.00%    | 11,052       | 47.06%   | 10,737      |
+
+Token counts are nearly identical (< 0.3% difference) because Medium/Long
+videos have 200-1000 GOPs; even with kr=0.5, the selected I-frames exceed
+32 and are truncated to baseline frame count.
+
+This motivates our future work on memory optimization (Technical Point 2):
+ViT activation pruning + chunked encoding to raise max_frames to 64+,
+at which point our GOP-level sparsification would regain effectiveness
+on medium videos.
+```
+
+**两个额外亮点可以提**：
+1. **Medium 上 naive_iframe/sparse 反超 Baseline**（+3.3pp / +4.4pp）：说明 I 帧选择质量高于均匀采样，即便帧数相同
+2. **Sparse@64 在 Short 上 0 OOM vs Baseline@64 89% OOM**：与 M/L 失效形成对比——稀疏化在可发挥的空间内效果显著
+
+---
+
+### 节点 5.3 — 论文整体结构建议（技术点 1 部分）
+
+```
+4. Experiments
+   4.1 Setup（数据集、模型、评估指标）
+       - 主实验：Video-MME Short (300 samples) + ActivityNet-QA
+       - 指标：Accuracy, Visual Tokens, Latency (ms), Speedup
+       - Baseline：qwen_omni_utils 标准推理链路，max_frames=32
+
+   4.2 Main Results（零损失加速）
+       - naive_iframe (kr=0.5): 75.93% = Baseline, −54% tokens, 2.0x speedup
+       - Bootstrap CI: naive_iframe vs baseline CI [−2.8, +4.3]（统计无差异）
+       - 加速比表格（TTFT / visual tokens / speedup）
+
+   4.3 OOM Analysis（扩展帧预算）
+       - Baseline@64: 89% OOM | Sparse@64: 0% OOM
+       - 稀疏化使 max_frames 从 32 扩展到 64 而不 OOM
+
+   4.4 Ablation Studies
+       - Two-Regime 理论验证（naive vs sparse @ kr=0.5 vs kr=0.2）
+       - Naive baselines 对比（uniform / random / iframe）
+       - Modality baselines（text_only / audio_only / video_only）
+       - Pareto kr sweep（kr=0.2 到 0.9）
+       - Alpha 稳健性（alpha=0.1 到 0.9 区间稳定）
+
+   4.5 Adaptive Strategy（Two-Regime 落地）
+       - kr ≥ 0.4 → naive_iframe（coverage-dominant）
+       - kr ≤ 0.3 → sparse/AV-LRM（relevance-dominant）
+
+5. Analysis & Limitations
+   5.1 Why GOP-level I-frame works（Two-Regime 理论解释）
+   5.2 Extremely Short Videos（MVBench，< 10s，结构性失效）
+   5.3 Long Videos with max_frames Constraint（M/L，引出技术点 2）
+
+6. Future Work
+   - 技术点 2：显存优化解锁 M/L
+   - 帧级稀疏化（< 10s 视频）
+   - Content-adaptive 扩展（task-aware / video-aware 动态调参）
+```
+
+---
+
+
+### 节点 5.4 — Adaptive v2 单路径重设计
+
+**时间**：3.10
+**问题**：旧 `run_adaptive()` 的外层路由有根本缺陷——用全局 `keep_ratio=0.5` 与固定 `adaptive_threshold=0.4` 比较，0.5 >= 0.4 恒成立，所有视频都走 naive_iframe，AV-LRM 从未被调用。
+**发现过程**：修复 `_safe_fetch_video` 分辨率 bug（宽高反转导致 resize 异常）后重跑实验，发现 adaptive 结果与 naive_iframe 完全一致，追溯代码确认路由逻辑恒走同一分支。
+**动作**：重设计为单路径 Content-Adaptive：
+```
+所有视频 → AV-LRM 打分 → 计算分数方差 σ²
+  σ² > 0.02 → Top-K 选择（信息集中）
+  σ² ≤ 0.02 → 均匀选择（信息均匀）
+```
+本质是始终走 sparse 路径，内层方差门控（`select_gops()` 已有实现）自动适配。
+**代码改动**：
+- `pipeline.py`: PipelineResult 加 `selection_strategy` / `score_variance` 字段；`_select_sparse()` metadata 加策略信息；`run_adaptive()` 重写为单路径调用 `run_sparse()`
+- `eval_videomme.py` / `eval_activitynet.py`: `record.mode = r.mode` 记录实际策略
+**Smoke test 结果**（3 视频 9 题）：
+- 所有视频走 top_k 策略，方差各异（0.0405 / 0.0260 / ...）
+- AV-LRM 确实在区分不同视频的信息分布
+- visual_tokens ~4322，与 sparse kr=0.5 一致
+**决策**：全量实验跑 Video-MME Short (108 题) + ActivityNet-QA，验证 AV-LRM 真正参与后的效果
+
+## 附录：关键数据速查（更新）
+
+### Video-MME Short (108 题)
+- Baseline: 75.93%, 2189ms, 10737 tokens
+- naive_iframe(0.5): **75.93%** (0.0pp), 1096ms (2.0x), 4939 tokens (−54%)
+- sparse(0.5): 69.44% (−6.5pp), 1085ms (2.0x), 4939 tokens (−54%)
+- sparse(0.2): 70.37% (−5.6pp), 586ms (3.7x), 2192 tokens (−80%)
+
+### Video-MME Medium/Long (各 90/102 题, max_frames=32)
+- Medium Baseline: 56.67%, 11082 tokens | Sparse: 61.11%, 11052 tokens | Naive: 60.00%, 11052 tokens
+- Long Baseline: 49.41%, 10558 tokens | Sparse: 49.02%, 10737 tokens | Naive: 47.06%, 10737 tokens
+- **结论**：token 差异 < 0.3%，稀疏化被 max_frames 截断
+
+### MVBench (3600 题，2-10s)
+- Baseline: 66.94% (3318 valid, 282 OOM)
+- naive_iframe(0.5): 53.59% (−13.35pp)，7/18 任务严重退化 (Δ > −20pp)
+
+### Sparse@64 闭环 (Short 108 题)
+- Baseline@64: 12 valid, **96 OOM (89%)**
+- Sparse@64: 108 valid, **0 OOM**
+
+### Two-Regime 交叉点
+- kr=0.3: naive 69.44% ≈ sparse 69.44%（持平，交叉点）
+- kr=0.5: naive 75.93% >> sparse 69.44%（+6.49pp，coverage-dominant）
+- kr=0.2: sparse 70.37% > naive 68.52%（+1.85pp，relevance-dominant）
+
+### 研究 Scope（最终确认，3.9）
+- **主实验**：Video-MME Short (11s-2min) + ActivityNet-QA (30-180s)
+- **Limitation**：MVBench (2-10s) + Video-MME Medium (4-15min) + Long (30-60min)
+- **依据**：端侧多模态推理加速同方向论文普遍聚焦 10s-180s 短视频
