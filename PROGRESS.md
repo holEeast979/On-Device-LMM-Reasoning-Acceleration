@@ -396,3 +396,4 @@
 - **[3.15]** 多轮缓存 Codex Review + 修复：修复缓存键设计、线程安全、AB/BA 设计、逐题对比；Smoke test 通过（10 视频，1.13x 加速）
 - **[3.15]** GOP + Cache 联合验证：确认两个技术点可以叠加工作，第 2 轮加速 1.78x
 - **[3.15]** 修复 pipeline.py bug：`_select_naive` 方法中 `min_gop_frames` 变量未定义，改为 `min_frames`
+- **[3.15]** Git 分支整理：创建 feature/av-lrm-sparse 分支保存 AV-LRM 打分研究快照；主分支标记 sparse 为 deprecated（保留代码以复现实验，推荐用 naive_iframe）；提交 encoder_cache 相关代码到主分支
