@@ -23,6 +23,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from typing_extensions import deprecated
+except ImportError:
+    def deprecated(_reason: str):
+        def _decorator(func):
+            return func
+        return _decorator
+
 import numpy as np
 import torch
 from PIL import Image
@@ -125,6 +133,10 @@ class PipelineResult:
     # 修复相关字段
     adaptive_min_gop: int = 0
     min_frames: int = 0
+
+    # 选择策略信息（adaptive 模式用）
+    selection_strategy: str = ""       # "top_k" / "uniform"
+    score_variance: float = 0.0
 
     # 错误
     error: Optional[str] = None
@@ -356,7 +368,7 @@ class SparseInferencePipeline:
         question: str,
         alpha: float = 0.5,
         keep_ratio: float = 0.5,
-        variance_threshold: float = 0.02,
+        variance_threshold: float = 0.05,
         min_gop_frames: int = 10,
         skip_audio: bool = False,
         max_frames: int = 32,
@@ -380,9 +392,9 @@ class SparseInferencePipeline:
         t0 = time.perf_counter()
         all_gop_frames = [g.num_frames for g in gop_analysis.gops]
         median_gop_frames = float(np.median(all_gop_frames)) if all_gop_frames else 0
-        adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
+        # adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
         scored_gops = score_gops(gop_analysis.gops, audio_energies,
-                                 alpha=alpha, min_gop_frames=adaptive_min_gop)
+                                 alpha=alpha, min_gop_frames=min_gop_frames)
         valid_gops_list = [sg for sg in scored_gops if sg.combined_score >= 0]
         n_valid = len(valid_gops_list)
         if max_frames > 0 and n_valid > 0:
@@ -409,6 +421,9 @@ class SparseInferencePipeline:
         num_frames_input = len(i_frames)
         preprocess_ms = gop_parse_ms + audio_extract_ms + scoring_ms + i_frame_decode_ms
 
+        score_variance = summary.get("score_variance", 0.0)
+        selection_strategy = "uniform_boosted" if score_variance > variance_threshold else "uniform"
+
         metadata = {
             "gop_parse_ms": gop_parse_ms,
             "audio_extract_ms": audio_extract_ms,
@@ -416,13 +431,17 @@ class SparseInferencePipeline:
             "i_frame_decode_ms": i_frame_decode_ms,
             "total_gops": total_gops,
             "selected_gops": selected_gops,
+            "selection_strategy": selection_strategy,
+            "score_variance": score_variance,
+            "min_gop_frames": min_gop_frames,
             "total_frames": total_frames,
             "keep_ratio_actual": keep_ratio_actual,
             "kr_requested": keep_ratio,
             "kr_adaptive": kr_adaptive,
             "adaptive_triggered": kr_adaptive < keep_ratio,
-            "adaptive_min_gop": adaptive_min_gop,
             "min_frames": min_frames,
+            "score_variance": score_variance,
+            "selection_strategy": selection_strategy,
         }
 
         # 当只有 1 个有效 GOP 时，音频与 1 帧视频在 processor 中可能无法对齐
@@ -460,7 +479,12 @@ class SparseInferencePipeline:
                 # 自动计算：取选中 GOP 的最大结束时间
                 selected = [sg for sg in scored_gops if sg.selected]
                 if selected:
+                    # 确保至少保留到最后一个选中 GOP 的音频
                     max_end = max(sg.gop.end_time_sec or 0 for sg in selected)
+                    # 如果最后一个有效 GOP 不在选中列表，也保留其音频（避免丢尾）
+                    valid_gops = [sg for sg in scored_gops if sg.combined_score >= 0]
+                    if valid_gops and valid_gops[-1] not in selected:
+                        max_end = max(max_end, valid_gops[-1].gop.end_time_sec or 0)
                     max_samples = int((max_end + 1.0) * sr)  # +1s 余量
                 else:
                     max_samples = len(audio_waveform)
@@ -501,8 +525,8 @@ class SparseInferencePipeline:
 
         all_gop_frames = [g.num_frames for g in gop_analysis.gops]
         median_gop_frames = float(np.median(all_gop_frames)) if all_gop_frames else 0
-        adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
-        valid_gops = [g for g in gop_analysis.gops if g.num_frames >= adaptive_min_gop]
+        # adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
+        valid_gops = [g for g in gop_analysis.gops if g.num_frames >= min_frames]
         n_valid = len(valid_gops)
         if max_frames > 0 and n_valid > 0:
             kr_adaptive = min(keep_ratio, max_frames / n_valid)
@@ -576,7 +600,6 @@ class SparseInferencePipeline:
             "kr_requested": keep_ratio,
             "kr_adaptive": kr_adaptive,
             "adaptive_triggered": kr_adaptive < keep_ratio,
-            "adaptive_min_gop": adaptive_min_gop,
             "min_frames": min_frames,
         }
         if not frames_pil:
@@ -747,6 +770,7 @@ class SparseInferencePipeline:
         self._clear_gpu()
         return result
 
+    @deprecated('Legacy sparse mode is kept only for comparison experiments. Prefer run_naive(strategy="iframe_uniform").')
     def run_sparse(
         self,
         video_path: str,
@@ -754,7 +778,7 @@ class SparseInferencePipeline:
         max_new_tokens: int = 256,
         alpha: float = 0.5,
         keep_ratio: float = 0.5,
-        variance_threshold: float = 0.02,
+        variance_threshold: float = 0.05,
         min_gop_frames: int = 10,
         skip_audio: bool = False,
         max_frames: int = 32,
@@ -762,8 +786,12 @@ class SparseInferencePipeline:
         min_frames: int = 8,
     ) -> PipelineResult:
         """
-        稀疏化推理：GOP 解析 → AV-LRM 打分 → I 帧解码 → 推理。
+        Deprecated: legacy sparse mode is kept only for comparison experiments.
 
+        人话就是：这条 AV-LRM 稀疏路径先别删，方便复现实验；
+        真正推荐走的主路是 `run_naive(strategy="iframe_uniform")`。
+
+        稀疏化推理：GOP 解析 → AV-LRM 打分 → I 帧解码 → 推理。
         只将选中 GOP 的 I 帧送入模型，大幅减少 visual token。
         """
         self.load_model()
@@ -791,11 +819,13 @@ class SparseInferencePipeline:
             result.total_frames = int(selected.metadata.get("total_frames", 0))
             result.total_gops = int(selected.metadata.get("total_gops", 0))
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
-            result.adaptive_min_gop = int(selected.metadata.get("adaptive_min_gop", 0))
+            result.adaptive_min_gop = int(selected.metadata.get("min_gop_frames", 0))
             result.min_frames = int(selected.metadata.get("min_frames", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
             result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
             result.kr_adaptive = float(selected.metadata.get("kr_adaptive", 0.0))
+            result.selection_strategy = str(selected.metadata.get("selection_strategy", ""))
+            result.score_variance = float(selected.metadata.get("score_variance", 0.0))
             result.preprocess_ms = selected.preprocess_ms
             result.num_frames_input = selected.num_frames_input
 
@@ -863,12 +893,14 @@ class SparseInferencePipeline:
             result.i_frame_decode_ms = float(selected.metadata.get("i_frame_decode_ms", 0.0))
             result.total_gops = int(selected.metadata.get("total_gops", 0))
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
-            result.adaptive_min_gop = int(selected.metadata.get("adaptive_min_gop", 0))
+            result.adaptive_min_gop = int(selected.metadata.get("min_gop_frames", 0))
             result.min_frames = int(selected.metadata.get("min_frames", 0))
             result.total_frames = int(selected.metadata.get("total_frames", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
             result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
             result.kr_adaptive = float(selected.metadata.get("kr_adaptive", 0.0))
+            result.selection_strategy = str(selected.metadata.get("selection_strategy", ""))
+            result.score_variance = float(selected.metadata.get("score_variance", 0.0))
             result.preprocess_ms = selected.preprocess_ms
             result.num_frames_input = selected.num_frames_input
 
@@ -901,30 +933,25 @@ class SparseInferencePipeline:
         max_new_tokens: int = 256,
         max_frames: int = 32,
         min_frames: int = 8,
-        adaptive_threshold: float = 0.4,
+        variance_threshold: float = 0.05,
     ) -> PipelineResult:
         """
-        Adaptive 推理：根据 keep_ratio 自动选择策略。
-        kr >= adaptive_threshold -> naive_iframe (coverage-dominant)
-        kr <  adaptive_threshold -> sparse/AV-LRM  (relevance-dominant)
+        Content-Adaptive 单路径：AV-LRM 打分 → 方差门控(Top-K/均匀) → I 帧推理。
+
+        所有视频都经过 AV-LRM 打分，由分数方差自动决定 Top-K 还是均匀选择：
+        - σ² > variance_threshold → Top-K（信息集中，选分数最高的 K 个）
+        - σ² ≤ variance_threshold → 均匀选择（信息均匀，等间距选 K 个）
         """
-        if keep_ratio >= adaptive_threshold:
-            result = self.run_naive(
-                video_path=video_path, question=question,
-                strategy="iframe_uniform", keep_ratio=keep_ratio,
-                max_frames=max_frames, min_frames=min_frames,
-                max_new_tokens=max_new_tokens,
-            )
-            branch = "naive_iframe"
-        else:
-            result = self.run_sparse(
-                video_path=video_path, question=question,
-                keep_ratio=keep_ratio, alpha=alpha,
-                max_frames=max_frames, min_frames=min_frames,
-                max_new_tokens=max_new_tokens,
-            )
-            branch = "sparse"
-        result.mode = f"adaptive(kr={keep_ratio:.1f}→{branch})"
+        result = self.run_sparse(
+            video_path=video_path, question=question,
+            keep_ratio=keep_ratio, alpha=alpha,
+            max_frames=max_frames, min_frames=min_frames,
+            max_new_tokens=max_new_tokens,
+            variance_threshold=variance_threshold,
+        )
+        strategy = result.selection_strategy or "unknown"
+        variance = result.score_variance
+        result.mode = f"adaptive({strategy},var={variance:.4f})"
         return result
 
     def run_text_only(

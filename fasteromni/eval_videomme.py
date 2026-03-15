@@ -134,28 +134,15 @@ import math as _math
 import torch as _torch
 from PIL import Image as _Image
 from qwen_omni_utils.v2_5.vision_process import (
-from qwen_omni_utils.v2_5.vision_process import (
     smart_nframes, smart_resize, FRAME_FACTOR, SPATIAL_MERGE_SIZE,
     VIDEO_MIN_TOKEN_NUM, VIDEO_MAX_TOKEN_NUM,
 )
 
 # 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE
+IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14  # 28, must match image_patch_size * merge_size
 VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
 VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = VIDEO_MAX_PIXELS
-from qwen_omni_utils.v2_5.vision_process import (
-    smart_nframes, smart_resize, FRAME_FACTOR, SPATIAL_MERGE_SIZE,
-    VIDEO_MIN_TOKEN_NUM, VIDEO_MAX_TOKEN_NUM,
-)
-
-# 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE
-VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
-VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = VIDEO_MAX_PIXELS
-)
-
+VIDEO_TOTAL_PIXELS = 24883200  # match fetch_video default
 _VIDEO_TIMEOUT = 120  # seconds
 
 
@@ -456,6 +443,9 @@ class EvalRecord:
     total_tokens: int = 0
     num_frames: int = 0
     error: str = ""
+    selection_strategy: str = ""
+    score_variance: float = 0.0
+    min_gop_frames_used: int = 0
 
 
 class _Timeout:
@@ -516,6 +506,7 @@ def run_single(
             elif mode == "video_only":
                 r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
+                # Legacy sparse mode: keep this branch for archived AV-LRM comparisons.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -523,6 +514,7 @@ def run_single(
                     min_frames=min_frames,
                 )
             elif mode == "sparse_no_audio":
+                # Legacy sparse ablation: same old path, just without audio features.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -548,6 +540,7 @@ def run_single(
                     max_frames=max_frames, min_frames=min_frames,
                     max_new_tokens=max_new_tokens,
                 )
+                record.mode = r.mode  # 记录实际策略: adaptive(top_k/uniform,var=...)
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -563,6 +556,9 @@ def run_single(
                 record.audio_tokens = r.audio_tokens
                 record.total_tokens = r.total_tokens
                 record.num_frames = r.num_frames_input
+                record.selection_strategy = r.selection_strategy
+                record.score_variance = r.score_variance
+                record.min_gop_frames_used = r.adaptive_min_gop
 
     except torch.cuda.OutOfMemoryError:
         record.error = "OOM"
@@ -580,12 +576,7 @@ def run_single(
 
 import torch
 
-_CSV_FIELDNAMES = [
-    "question_id", "video_file_id", "duration", "domain", "task_type",
-    "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
-    "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
-    "num_frames", "error", "pred_raw",
-]
+_CSV_FIELDNAMES = ["question_id", "video_file_id", "duration", "domain", "task_type", "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct", "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens", "num_frames", "error", "pred_raw", "selection_strategy", "score_variance", "min_gop_frames_used"]
 
 
 def run_evaluation(
@@ -732,12 +723,7 @@ def save_results(records: List[EvalRecord], summaries: List[Dict], out_dir: str,
 
     # CSV 详细记录
     csv_path = os.path.join(out_dir, f"videomme_{tag}_details.csv")
-    fieldnames = [
-        "question_id", "video_file_id", "duration", "domain", "task_type",
-        "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
-        "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
-        "num_frames", "error", "pred_raw",
-    ]
+    fieldnames = _CSV_FIELDNAMES
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
