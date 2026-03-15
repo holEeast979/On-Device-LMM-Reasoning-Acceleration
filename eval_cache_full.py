@@ -346,9 +346,11 @@ def run_pipeline_once(
     t0 = time.perf_counter()
     try:
         if mode == "cache_only":
-            result = pipe.run_sparse(
+            # Use naive_iframe as baseline, NOT sparse (AV-LRM)
+            result = pipe.run_naive(
                 video_path=sample.video_path,
                 question=prompt,
+                strategy="iframe_uniform",
                 keep_ratio=KEEP_RATIO,
                 max_frames=MAX_FRAMES,
                 max_new_tokens=MAX_NEW_TOKENS,
