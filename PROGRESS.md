@@ -12,15 +12,16 @@
 ---
 
 ## 当前阶段
-**技术点 1（GOP 级 token 稀疏化）基本完成，准备论文写作**
+**技术点 1（GOP 级 token 稀疏化）已完成，准备技术点 2/3 开发**
 
-核心实验已全部完成。经过 adaptive v2/v3 探索，确认 **naive_iframe（均匀选 I 帧）** 为最优方案，AV-LRM 打分在当前实验设置下未能超越简单策略。
+核心实验已全部完成。经过 adaptive v2/v3/v4/v5 探索，确认 **naive_iframe（均匀选 I 帧）** 为最优方案。
 
 **研究定位**：聚焦 **10s-180s 短视频**（Video-MME Short 11s-2min + ActivityNet-QA 30-180s），对齐端侧多模态推理加速的典型场景。
 
 **论文策略**：
 - **毕业论文**：用 naive_iframe 作为核心方法（training-free + codec-aware + 零损失加速），材料充足
-- **会议论文**：需补充技术点 2/3（RingBuffer + 显存优化）形成完整系统，或探索 content-adaptive 扩展
+  - **当前任务：V5 实验已完成，确认 naive_iframe 为最优方案。准备开发技术点 2（RingBuffer）+ 技术点 3（显存优化）
+- **会议论文**：后续升级，CLIP question-aware rerank 为首选方向
 
 ## 项目背景
 研究 **Qwen2.5-Omni-7B** 多模态大模型的推理加速，构建**端侧多模态推理加速系统**。
@@ -77,6 +78,8 @@
 | sparse (kr=0.5) | 69.44% | 61.11% | 47.06% | 60.33% |
 | adaptive_v2 (top_k) | 72.22% | — | — | — |
 | adaptive_v3 (stratified) | 71.30% | — | — | — |
+| **adaptive_v4 (bug fix)** | **75.0%** | — | — | — |
+| **adaptive_v5 (gate invert)** | **73.15%** | — | — | — |
 
 ### Adaptive 策略探索结果（3.10-3.11）
 
@@ -132,6 +135,8 @@
 - **MVBench 退化**：极短视频 GOP 少，kr=0.5 后帧数过少，时序信息丧失
 - **Sparse@64 价值**：Short@64 Baseline 89% OOM，Sparse 0 OOM，证明稀疏化在高帧数场景的价值
 - **AV-LRM 打分问题**：adaptive v2/v3 均未超越 naive_iframe，怀疑 I 帧码率和音频能量不能准确反映信息密度
+- **Adaptive v4 验证**：修复 bug 后 75.0% 追平 naive_iframe，但 top_k（66.7%）仍比 uniform（77.0%）低 10pp，确认 training-free 打分天花板
+- **技术路线决策**：毕业论文用 naive_iframe，会议论文后续升级（GOP token 压缩 / question-aware 打分）
 
 ## 稀疏化链路三层保护机制
 
@@ -161,7 +166,8 @@
 ## 待办事项
 
 ### P0（论文写作准备，3.11-3.25）
-- [ ] **代码全面检查**：用 GPT 检查 AV-LRM 打分逻辑（sparse.py / gop_parser.py / audio_energy.py），确认是否有根本性问题
+- [x] **Adaptive v5 门控反转实验**：验证完成，确认 naive_iframe 为最优方案
+- [x] **代码全面检查**：GPT Review 发现 7 个问题，修复 P0+P1-4+P2-7，adaptive v4 达 75.0%
 - [ ] **补齐 latency/token 对比表**：整理已有实验数据中的 TTFT/VisTok，输出论文级对比表
 - [ ] **论文大纲更新**：基于 naive_iframe 为核心方法更新章节结构
 - [ ] **图表制作**：架构图 + 流程图 + 三层保护机制示意图 + 实验曲线
@@ -198,8 +204,12 @@
 - [x] MVBench 少 GOP 退化修复
 - [x] Adaptive v2 单路径重设计
 - [x] Adaptive v3 stratified_top_k 实验
+- [x] GPT Code Review + P0/P1/P2 修复
+- [x] Adaptive v4 全量验证（75.0%，追平 naive_iframe）
+- [x] **技术路线决策：毕业论文锁定 naive_iframe，会议论文后续升级**
 
 ## 外部反馈
+- **[3.11] 技术路线转折**：adaptive v4 修复后 75.0% 追平 naive_iframe，但 top_k 仍低 10pp；确认 training-free 打分天花板太低，毕业论文锁定 naive_iframe，会议论文后续升级硬核方案
 - **[3.11] 论文策略确认**：毕业论文用 naive_iframe（材料充足），会议论文需补充技术点 2/3 或 content-adaptive
 - **[3.11] 技术点 2/3 可行性评估**：RingBuffer 3-5 天，显存优化 1-2 天，时间可控
 - **[3.11] 与开题报告对齐**：RingBuffer = 推流中间件，逻辑自洽
@@ -280,10 +290,25 @@
 - **保守**：70-72%（比当前 69.44% 有提升）
 - **决策点**：≥74% 继续修复打分逻辑，70-74% 放弃 AV-LRM 转技术点 2/3，<70% 深入分析
 
+## 会议论文备选方向
+
+### CLIP Question-Aware Rerank（最有价值）
+- **核心思路**：GOP I 帧解码 → CLIP 计算每帧和问题的相似度 → 选最相关的帧
+- **优势**：
+  - 仍然 training-free（冻结 CLIP 不训练）
+  - 解决 question-agnostic 的根本矛盾（看了问题再选帧）
+  - 架构轻量（CLIP ViT-B/32 ~600MB，推理 ~5ms/帧）
+  - Novelty 足够：codec-aware GOP + question-aware CLIP 双层 training-free
+- **实现成本**：中等（3-5 天）
+- **预期效果**：有望超越 naive_iframe 75.93%
+
+### 其他备选
+- GOP 感知 token 压缩（压缩已选帧的 token，而非选帧）
+- Codec-aware temporal pooling（利用 GOP 结构做时间维度 token 合并）
+- 音频特征升级：RMS → VAD + ASR token density
+
 ## 待探讨问题
-- [ ] **AV-LRM 打分逻辑根因分析**：I 帧码率是否能代表信息密度？音频能量是否有效？归一化是否正确？
-- [ ] **方差门控阈值**：0.05 是否合理？是否应该动态调整？
-- [ ] **Top-K 时间聚类问题**：是否需要加入时间约束（如最小间隔）？
+- [ ] **方差门控反转验证**：V5 实验中，高方差 → uniform_boosted 效果如何
 - [ ] **Content-adaptive sparsification**：根据视频类型动态调整 kr 和 alpha
 - [ ] **P/B 帧利用**：是否可以在特定任务（动作识别）中利用 P/B 帧？
 
@@ -299,8 +324,11 @@
 - `videomme/adaptive_v3/` — Adaptive v3 (stratified_top_k)
 - `activitynet/adaptive_v2/` — ActivityNet adaptive v2
 - `activitynet/adaptive_v3/` — ActivityNet adaptive v3
+- `videomme/adaptive_v4/` — Adaptive v4 (P0+P1 bug fix, 75.0%)
 
+- **[3.11]** Adaptive v5 门控反转实验失败：73.15%（vs v4 75.0%），uniform_boosted 57.1% vs stratified_top_k 66.7%；确认最优策略是全部用 uniform（naive_iframe），完成技术点 1 所有探索
 ## 变更日志
+- **[3.11]** Adaptive v4 修复验证：75.0%（追平 naive_iframe 75.93%），top_k 66.7% vs uniform 77.0%；确认 training-free 打分天花板，毕业论文锁定 naive_iframe，会议论文后续升级
 - **[3.11]** 论文策略讨论：确认毕业论文用 naive_iframe，会议论文需补充技术点 2/3；评估技术点 2/3 工作量（RingBuffer 3-5天，显存优化 1-2天）；确认与开题报告对齐（RingBuffer = 推流中间件）
 - **[3.10-3.11]** Adaptive v3 stratified_top_k 实验：Video-MME Short 71.3%，ActivityNet 40.6%，均未超越 naive_iframe；per-task-type 分析显示 0 wins / 8 ties / 4 losses；确认 AV-LRM 打分逻辑可能存在问题
 - **[3.10]** Adaptive v2 单路径重设计：发现旧 run_adaptive() 恒走 naive_iframe，重写为单路径 AV-LRM 打分 + 方差门控；修复 _safe_fetch_video 分辨率 bug
@@ -314,3 +342,57 @@
 - **[2.18]** Video-MME 完整评估 + kr 消融
 - **[2.16]** Video-MME Pipeline + GPT Code Review 修复
 - **[2.15]** 串行 Pipeline 跑通
+
+**v4（Bug 修复：方差阈值 + 保头尾 + 音频对齐）**：
+- Video-MME Short: 75.0%（追平 naive_iframe）
+- 策略分布：uniform 77.0% (87题), stratified_top_k 66.7% (21题)
+- 结论：修复 bug 后追平 baseline，但 top_k 仍比 uniform 低 10pp
+
+**v5（门控反转：高方差→uniform_boosted）**：
+- Video-MME Short: 73.15%（比 v4 低 1.85pp）
+- 策略分布：uniform 77.0% (87题), uniform_boosted 57.1% (21题)
+- 结论：门控反转假设错误，uniform_boosted 比 stratified_top_k 更差 9.6pp
+
+**最终结论**：
+- training-free + question-agnostic 打分的天花板就是 naive_iframe
+- 毕业论文锁定 naive_iframe，放弃 adaptive 所有变体
+- 会议论文后续升级：CLIP question-aware rerank
+
+
+**v4（Bug 修复：方差阈值 + 保头尾 + 音频对齐）**：
+- Video-MME Short: 75.0%（追平 naive_iframe）
+- 策略分布：uniform 77.0% (87题), stratified_top_k 66.7% (21题)
+- 结论：修复 bug 后追平 baseline，但 top_k 仍比 uniform 低 10pp
+
+**v5（门控反转：高方差→uniform_boosted）**：
+- Video-MME Short: 73.15%（比 v4 低 1.85pp）
+- 策略分布：uniform 77.0% (87题), uniform_boosted 57.1% (21题)
+- 同一批 7 个高方差视频：uniform_boosted 57.1% vs stratified_top_k 66.7%（-9.6pp）
+- 结论：门控反转假设错误，uniform_boosted 比 stratified_top_k 更差
+
+**最终结论**：
+- training-free + question-agnostic 打分的天花板就是 naive_iframe
+- 毕业论文锁定 naive_iframe，放弃 adaptive 所有变体
+- 会议论文后续升级：CLIP question-aware rerank
+
+
+### 多轮缓存（Encoder Cache, 3.15）
+
+**Smoke Test (10 视频)**:
+- Uncached: 80.0% acc, 3395ms avg
+- Cached: 80.0% acc, 2998ms avg  
+- Speedup: 1.13x (13% improvement)
+- Prediction match: PASS (0 mismatches)
+
+**GOP + Cache 验证**:
+- Without cache: 6240ms
+- With cache Q1: 4905ms (1.27x)
+- With cache Q2: 3503ms (1.78x)
+- Cache hits: video=1, audio=1
+- Visual tokens: 4322 (GOP 稀疏化生效)
+
+
+## 变更日志（续）
+- **[3.15]** 多轮缓存 Codex Review + 修复：修复缓存键设计、线程安全、AB/BA 设计、逐题对比；Smoke test 通过（10 视频，1.13x 加速）
+- **[3.15]** GOP + Cache 联合验证：确认两个技术点可以叠加工作，第 2 轮加速 1.78x
+- **[3.15]** 修复 pipeline.py bug：`_select_naive` 方法中 `min_gop_frames` 变量未定义，改为 `min_frames`

@@ -619,3 +619,356 @@ on medium videos.
 - 可以在论文中坦诚讨论：codec-level 特征（I 帧码率、音频 RMS）不足以代表语义重要性
 - 未来工作：需要 content-aware 特征（场景切换检测、语音识别、OCR 等）
 - 这为 Future Work 提供了明确方向
+
+---
+
+## Phase 6.7 — Adaptive V4 修复验证 + 技术路线转折
+
+**时间**：3.11
+**问题**：GPT Code Review 发现 7 个问题后，修复 P0（3个）+ P1-4 + P2-7，验证修复效果
+
+**动作**：
+1. 修复 _stratified_top_k_selection 强制保留首尾 GOP
+2. 方差阈值 0.02 → 0.05
+3. 音频对齐：保留到最后有效 GOP 的音频
+4. 恢复 min_gop_frames 参数不被覆盖
+5. 补充 selection_strategy / score_variance / min_gop_frames_used 到 CSV
+
+**关键证据**：
+- adaptive v4: **75.0%**（108 题，0 错误）
+- 比 v2/v3（69-72%）提升 3-6pp，基本追平 naive_iframe（75.93%）
+- 策略分布：uniform 87 条 77.0% vs stratified_top_k 21 条 66.7%
+- top_k 在 Object Reasoning 上 0/3 全错，是主要拖累项
+
+**核心发现**：
+- 修复 bug 后 adaptive 追平了 naive_iframe，说明之前的差距主要来自工程 bug 而非方法本身
+- 但 top_k（打分选帧）仍然比 uniform（等间隔选帧）低 10pp
+- 根本原因确认：**training-free + question-agnostic 的打分天花板太低**
+  - DCT 能量（画面复杂度）≠ 语义重要性
+  - 音频 RMS（声音大小）≠ 信息量
+  - 不看问题就不知道哪些帧"有用"，这不是换个特征就能解决的
+
+**决策（重要转折）**：
+1. **毕业论文**：锁定 naive_iframe（均匀 I 帧），不再投入 AV-LRM 打分优化
+   - 75.93% = Baseline，2.0x 加速，54% token 减少，材料充足
+2. **会议论文**：后续升级，需要更硬核的技术点
+   - 候选方向：GOP 感知 token 压缩、Codec-aware temporal pooling、轻量 question-aware 打分（CLIP）
+   - 目标：超越 naive_iframe，提供真正的 content-adaptive 能力
+
+**为什么放弃继续优化 AV-LRM**：
+- training-free 约束下，底层 codec 特征无法捕捉语义相关性
+- 即使修完所有 bug，top_k 仍然比 uniform 低 10pp
+- 继续投入 ROI 太低：改打分特征需要 1-2 天，且大概率仍无法超越 uniform
+- 毕业论文时间紧迫，应聚焦论文写作而非继续实验
+
+**实验数据存档**：
+- `videomme/adaptive_v4/` — Adaptive V4 修复后全量结果（108 题 Short）
+
+---
+
+## Phase 6.8 — 会议论文方向确定 + 毕业论文任务规划
+
+**时间**：3.11
+**问题**：V4 修复后追平 naive_iframe，但 top_k 仍比 uniform 低 10pp；GPT Review 指出门控逻辑应该反转
+
+**动作**：
+1. 门控逻辑反转：高方差 → uniform_boosted（K×1.4），低方差 → uniform
+2. 讨论会议论文方向，确定 CLIP question-aware rerank 为首选
+
+**会议论文首选方向：CLIP Question-Aware Rerank**
+
+核心思路：
+- GOP I 帧解码 → CLIP 计算每帧和问题的相似度 → 选最相关的帧
+- 仍然 training-free（冻结 CLIP 不训练）
+- 解决 question-agnostic 的根本矛盾（看了问题再选帧）
+- 架构轻量（CLIP ViT-B/32 ~600MB，推理 ~5ms/帧）
+
+优势：
+- Novelty 足够：codec-aware GOP + question-aware CLIP 双层 training-free
+- 有望超越 naive_iframe 75.93%
+- 实现成本中等（3-5 天）
+
+**毕业论文任务规划**：
+1. 等 V5 门控反转实验结果（预计效果一般）
+2. 开发技术点 2：RingBuffer 流水线（3-5 天）
+3. 开发技术点 3：显存碎片优化（1-2 天）
+4. 联合实验 + 论文写作
+
+**决策**：
+- 毕业论文锁定 naive_iframe + 技术点 2/3，不再投入 AV-LRM 打分优化
+- 会议论文后续升级，CLIP rerank 为主攻方向
+
+---
+
+## Phase 6.9 — V5 门控反转实验验证失败
+
+**时间**：3.11
+**问题**：V5 门控反转实验（高方差→uniform_boosted，低方差→uniform）效果不佳
+
+**实验结果**：
+- V5 总体准确率：73.15% (79/108)
+- 策略分布：
+  - uniform: 87 samples, 77.0% acc
+  - uniform_boosted: 21 samples, 57.1% acc
+- vs V4: -1.85pp 准确率, +237 VisTok
+
+**关键发现**：
+- 同一批 7 个高方差视频（21 个问题）：
+  - V4 stratified_top_k: 66.7%
+  - V5 uniform_boosted: 57.1%
+  - 差距：-9.6pp
+- uniform_boosted 在 Artistic Performance 只有 33.3%（vs uniform 100%）
+
+**结论**：
+- 门控反转假设错误：高方差视频用 uniform_boosted（多给帧）反而更差
+- stratified_top_k 虽然打分逻辑不完美，但选择性采样比盲目多给帧更有效
+- 但 top_k (66.7%) 仍然比 uniform (77.0%) 差 10pp
+- **最优策略：不要门控，全部用 uniform（即 naive_iframe）**
+
+**最终决策**：
+- 毕业论文锁定 naive_iframe (75.93%)，放弃 adaptive 所有变体
+- 转向技术点 2/3 开发：RingBuffer + 显存优化
+- 会议论文后续升级：CLIP question-aware rerank
+
+**实验数据存档**：
+-  — V5 门控反转全量结果（108 题 Short）
+
+
+---
+
+## Phase 6.9 — V5 门控反转实验验证失败
+
+**时间**：3.11
+**问题**：V5 门控反转实验（高方差→uniform_boosted，低方差→uniform）效果不佳
+
+**实验结果**：
+- V5 总体准确率：73.15% (79/108)
+- 策略分布：
+  - uniform: 87 samples, 77.0% acc
+  - uniform_boosted: 21 samples, 57.1% acc
+- vs V4: -1.85pp 准确率, +237 VisTok
+
+**关键发现**：
+- 同一批 7 个高方差视频（21 个问题）：
+  - V4 stratified_top_k: 66.7%
+  - V5 uniform_boosted: 57.1%
+  - 差距：-9.6pp
+- uniform_boosted 在 Artistic Performance 只有 33.3%（vs uniform 100%）
+
+**结论**：
+- 门控反转假设错误：高方差视频用 uniform_boosted（多给帧）反而更差
+- stratified_top_k 虽然打分逻辑不完美，但"选择性采样"比"盲目多给帧"更有效
+- 但 top_k (66.7%) 仍然比 uniform (77.0%) 差 10pp
+- **最优策略：不要门控，全部用 uniform（即 naive_iframe）**
+
+**最终决策**：
+- 毕业论文锁定 naive_iframe (75.93%)，放弃 adaptive 所有变体
+- 转向技术点 2/3 开发：RingBuffer + 显存优化
+- 会议论文后续升级：CLIP question-aware rerank
+
+**实验数据存档**：
+- videomme/adaptive_v5_real/ — V5 门控反转全量结果（108 题 Short）
+
+
+---
+
+## 研究链路总结：从 Sparse 到 Naive I-Frame
+
+### Phase 6.1-6.5 — Adaptive 策略探索（3.10）
+
+**初始假设**：AV-LRM 打分（视觉码率 + 音频能量）可以智能选择关键帧，超越均匀采样。
+
+**探索路径**：
+1. **Adaptive v1**：外层路由 `keep_ratio >= 0.4 → naive_iframe, else → sparse`
+   - 问题：0.5 >= 0.4 恒成立，所有视频走 naive_iframe，AV-LRM 从未被调用
+   
+2. **Adaptive v2**（单路径重设计）：所有视频 → AV-LRM 打分 → 方差门控
+   - 方差 > 0.02 → Top-K 选择（信息集中）
+   - 方差 ≤ 0.02 → 均匀选择（信息均匀）
+   - 结果：Video-MME Short 72.22%（比 naive_iframe 75.93% 低 3.7pp）
+   - 问题：Top-K 按分数排序导致高分帧时间聚类，破坏时间覆盖度
+
+3. **Adaptive v3**（Stratified Top-K）：强制时间覆盖度
+   - 将 GOP 序列分段，每段选最高分
+   - 结果：71.30%（比 v2 还低 0.9pp）
+   - 问题：强制覆盖度反而稀释了高分 GOP，两头不讨好
+
+**初步结论**：AV-LRM 打分可能存在根本问题，高分 GOP 不一定是真正重要的帧。
+
+### Phase 6.6 — GPT Code Review（3.11）
+
+**问题**：adaptive v2/v3 均未超越 naive_iframe，需要深入分析代码逻辑。
+
+**GPT 发现的 7 个问题**：
+- **P0-1**：方差阈值过低（0.02 vs 0.05），99% 视频走 top_k，"自适应"名存实亡
+- **P0-2**：top_k 不保头尾，丢失视频开头和结尾
+- **P0-3**：音频喂给模型时和选帧不匹配（音画错位）
+- **P1-4**：min_gop_frames 参数被偷偷覆盖
+- **P1-5**：打分逻辑不"懂题"，更像"复杂度分数"
+- **P1-6**：按 GOP 个数分段，不是按时间分段
+- **P2-7**：元数据没落盘到 CSV
+
+**核心洞察**：
+> AV-LRM 打分在挑"画面复杂、声音大、看起来热闹"的段，而不是挑"对答题最关键"的段。
+
+### Phase 6.7 — Adaptive V4 修复验证（3.11）
+
+**修复内容**：
+- 方差阈值 0.02 → 0.05
+- stratified_top_k 强制保留首尾 GOP
+- 音频对齐：保留到最后有效 GOP 的音频
+- 恢复 min_gop_frames 参数
+- 补充 selection_strategy / score_variance 到 CSV
+
+**结果**：
+- Video-MME Short: 75.0%（追平 naive_iframe）
+- 策略分布：uniform 77.0% (87题), stratified_top_k 66.7% (21题)
+
+**关键发现**：
+- 修复 bug 后追平了 naive_iframe → 之前的差距主要来自工程 bug
+- 但 top_k 仍比 uniform 低 10pp → **training-free + question-agnostic 打分的天花板**
+- 不看问题就不知道哪些帧"有用"，这不是换个特征就能解决的根本矛盾
+
+### Phase 6.8 — 会议论文方向确定（3.11）
+
+**决策**：
+- 毕业论文：锁定 naive_iframe，不再投入 AV-LRM 打分优化
+- 会议论文：CLIP question-aware rerank（training-free 但 question-aware）
+
+### Phase 6.9 — V5 门控反转实验（3.11）
+
+**假设**：GPT Review 后，尝试反转门控逻辑
+- 高方差 → uniform_boosted（K×1.4，更保守）
+- 低方差 → uniform
+
+**结果**：
+- 总体准确率：73.15%（vs V4 75.0%，-1.85pp）
+- 同一批 7 个高方差视频：uniform_boosted 57.1% vs stratified_top_k 66.7%（-9.6pp）
+
+**结论**：
+- 门控反转假设错误
+- stratified_top_k 虽然打分逻辑不完美，但"选择性采样"比"盲目多给帧"更有效
+- 但 top_k (66.7%) 仍然比 uniform (77.0%) 差 10pp
+- **最优策略：不要门控，全部用 uniform（即 naive_iframe）**
+
+### 最终结论
+
+**Naive I-Frame 为什么是最优方案**：
+1. **Coverage-dominant**：kr ≥ 0.5 时，时间覆盖度比帧选择性更重要
+2. **Question-agnostic 天花板**：不看问题内容，任何打分特征都无法超越均匀采样
+3. **Codec-aware 优势**：I 帧是完整画面信息，天然适合稀疏化
+4. **Training-free**：无需训练，直接利用 GOP 结构
+
+**实验数据支持**：
+- naive_iframe: 75.93%（零损失）
+- adaptive_v4 (uniform): 77.0%（87 题）
+- adaptive_v4 (top_k): 66.7%（21 题）
+- adaptive_v5 (uniform_boosted): 57.1%（21 题）
+
+**下一步**：
+- 技术点 2：RingBuffer 流水线（CPU/GPU 异步并行）
+- 技术点 3：显存碎片优化（ViT 后清理激活值）
+- 会议论文：CLIP question-aware rerank（解决 question-agnostic 矛盾）
+
+
+---
+
+## Phase 7 — 多轮缓存开发与修复（3.12-3.15）
+
+**时间**：3.12-3.15
+**目标**：实现 Encoder Cache，优化同一视频重复查询场景
+
+### 7.1 — 初始实现（3.12）
+
+**动作**：
+1. 实现 `encoder_cache.py`：Hook-based 设计，拦截 `get_video_features()` 和 `get_audio_features()`
+2. 实现 `test_cache_eval_10videos.py`：10 视频 × 3 问测试脚本
+3. 缓存策略：第一轮缓存 encoder 输出，后续轮次直接返回
+
+**设计特点**：
+- Hook-based：不破坏 FasterOmni 原有 GOP 解析链路
+- 缓存键：`md5(video_path + max_frames)`
+- 线程安全：使用全局 `_current_cache_key`
+
+### 7.2 — Codex Review 发现问题（3.14）
+
+**问题**：
+1. **P0-1 缓存键设计不安全**：只用 `video_path + max_frames`，不同帧选择策略会错误复用
+2. **P0-2 线程安全是假的**：全局变量，并发请求会互相覆盖
+3. **P0-3 预热效应混入**：uncached 总是先跑，Turn 1 加速 1.11x 不合理
+4. **P1-4 准确率检查不严格**：只比较总分，两个错误可以互相抵消
+5. **P1-5 实验命名误导**：称为"多轮对话"，实际是"重复查询"
+
+**初始实验结果（修复前）**：
+- Uncached: 80.0% acc, 3466ms
+- Cached: 80.0% acc, 3014ms
+- Speedup: 1.15x
+- Turn 1 加速: 1.11x ❌（预热效应）
+
+### 7.3 — 修复实施（3.15）
+
+**修复内容**：
+
+**P0 修复**：
+1. **缓存键扩展**：加入 `keep_ratio`, `selection_strategy`, `frame_indices`, `audio_span`
+2. **线程安全**：用 `contextvars.ContextVar` 替代全局变量，每个 hook 实例独立
+3. **AB/BA 设计**：一半视频先 uncached，一半先 cached，消除预热效应
+
+**P1 修复**：
+4. **逐题对比**：新增 `compare_predictions()` 函数，检查每个 question_id
+5. **实验重命名**："Multiturn Cache" → "Same-Video Repeated-Query Encoder Cache"
+
+**代码变更**：
+- `encoder_cache.py`: 扩展 `make_cache_key()` 方法，用 ContextVar 替代全局变量
+- `test_cache_eval_10videos.py`: 实现 AB/BA 分组，实现逐题对比
+
+### 7.4 — 修复验证（3.15）
+
+**Smoke Test 结果（10 视频）**：
+- Uncached: 80.0% acc, 3395ms
+- Cached: 80.0% acc, 2998ms
+- Speedup: 1.13x ✅（真实加速，无预热）
+- Query 1 加速: 1.07x ✅（接近理论值）
+- Prediction match: PASS (0 mismatches) ✅
+
+**关键改进**：
+- 加速比从 1.15x 降到 1.13x（消除预热效应）
+- Query 1 加速从 1.11x 降到 1.07x（合理）
+- 准确率检查从总分对比升级到逐题对比
+
+### 7.5 — GOP + Cache 联合验证（3.15）
+
+**问题**：发现 `pipeline.py` 中 `_select_naive()` 方法有 bug
+- 第 521 行使用了未定义的 `min_gop_frames` 变量
+- 修复：改为 `min_frames`
+
+**验证结果**：
+- Without cache: 6240ms（GOP 稀疏化，无缓存）
+- With cache Q1: 4905ms（1.27x）
+- With cache Q2: 3503ms（1.78x）
+- Cache hits: video=1, audio=1 ✅
+- Visual tokens: 4322（GOP 稀疏化生效）✅
+
+**结论**：
+- ✅ GOP 稀疏化 + 多轮缓存可以正常叠加工作
+- ✅ 第 2 轮加速 1.78x，符合预期
+- ✅ 准备全量实验（Cache-only + GOP+Cache）
+
+### 7.6 — 技术定位与下一步
+
+**技术定位**：
+- 多轮缓存作为"辅助优化"，不作为主要技术点
+- 适合毕业论文，会议论文需要更硬核技术点（CLIP question-aware rerank）
+- 13% 加速虽然不高，但真实可靠
+
+**下一步实验**：
+1. **Cache-only 全量**：Video-MME 108 题 + ActivityNet 150 视频
+2. **GOP + Cache 全量**：Video-MME 108 题 + ActivityNet 150 视频
+3. **消融实验**：video-only cache / audio-only cache
+4. **Bootstrap 置信区间**：统计显著性验证
+
+**预期结果**：
+- Cache-only: 1.13x ± 0.02
+- GOP + Cache: 2.0x × 1.13x ≈ 2.2-2.3x
+- 两个数据集互相验证
+
