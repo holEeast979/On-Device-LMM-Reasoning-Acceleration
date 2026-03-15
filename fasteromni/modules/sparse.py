@@ -149,11 +149,12 @@ def select_gops(
     score_variance = float(np.var(valid_scores))
 
     if score_variance > variance_threshold:
-        # Top-K: 选分数最高的 K 个
-        selected_indices = _top_k_selection(valid_indices, valid_scores, K)
-        strategy = "top_k"
+        # 高方差 = 难例，更保守：uniform + 提高 keep_ratio
+        K_boosted = min(len(valid_indices), math.ceil(K * 1.4))
+        selected_indices = _uniform_selection(valid_indices, K_boosted)
+        strategy = "uniform_boosted"
     else:
-        # 均匀采样: 等间隔选 K 个
+        # 低方差：正常 uniform
         selected_indices = _uniform_selection(valid_indices, K)
         strategy = "uniform"
 
@@ -172,6 +173,36 @@ def _top_k_selection(valid_indices: List[int], scores: List[float], K: int) -> L
     paired = list(zip(valid_indices, scores))
     paired.sort(key=lambda x: x[1], reverse=True)
     selected = [idx for idx, _ in paired[:K]]
+    return selected
+
+
+def _stratified_top_k_selection(valid_indices: List[int], scores: List[float], K: int) -> List[int]:
+    """分段 Top-K：强制保留首尾，中间按分段选高分"""
+    n = len(valid_indices)
+    if K >= n:
+        return list(valid_indices)
+
+    if K <= 2:
+        # K=1 或 K=2，直接返回首尾
+        return [valid_indices[0], valid_indices[-1]][:K]
+
+    # 强制保留首尾
+    selected = [valid_indices[0], valid_indices[-1]]
+    remaining_K = K - 2
+
+    # 中间部分按分段选高分
+    middle_indices = valid_indices[1:-1]
+    if remaining_K > 0 and len(middle_indices) > 0:
+        segments = np.array_split(range(len(middle_indices)), remaining_K)
+        for seg in segments:
+            if len(seg) == 0:
+                continue
+            # 在原始 scores 中找对应位置（+1 因为跳过了第一个）
+            best_local_pos = max(seg, key=lambda p: scores[p + 1])
+            selected.append(middle_indices[best_local_pos])
+
+    # 按时间顺序排序
+    selected.sort()
     return selected
 
 
