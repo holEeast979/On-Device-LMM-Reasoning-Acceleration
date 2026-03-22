@@ -1,18 +1,18 @@
 """
-Video-MME 评估脚本
+ActivityNet-QA 评估脚本
 
-选择题格式，评估零歧义（pred == gt）。
-支持 baseline / sparse / sparse-no-audio 三种模式。
+开放式问答格式（主要是 yes/no），评估字符串匹配。
+支持 baseline / sparse / sparse-no-audio / adaptive 等模式。
 
 Usage:
     # 快速验证（5 个视频）
-    python fasteromni/eval_videomme.py --max-videos 5
+    python fasteromni/eval_activitynet.py --max-videos 5
 
     # 完整评估（全部已下载视频）
-    python fasteromni/eval_videomme.py
+    python fasteromni/eval_activitynet.py
 
     # 消融实验
-    python fasteromni/eval_videomme.py --sweep keep_ratio
+    python fasteromni/eval_activitynet.py --sweep keep_ratio
 """
 from __future__ import annotations
 
@@ -139,10 +139,11 @@ from qwen_omni_utils.v2_5.vision_process import (
 )
 
 # 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14  # 28, must match image_patch_size * merge_size
+IMAGE_FACTOR = SPATIAL_MERGE_SIZE
 VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
 VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = 24883200  # match fetch_video default
+VIDEO_TOTAL_PIXELS = VIDEO_MAX_PIXELS
+
 _VIDEO_TIMEOUT = 120  # seconds
 
 
@@ -208,16 +209,15 @@ def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
     # 2. 计算需要多少帧
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
 
-    # 3. 单次 ffmpeg 调用提取所有帧（select 滤镜 + rawvideo pipe）
-    indices = _torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+    # 3. 用 fps 滤镜均匀采样（比 select 快得多）
+    # 计算目标 fps：nframes / duration
+    duration = total_frames / video_fps
+    target_fps = nframes / duration
+    sample_fps = target_fps
 
-    # 构建 select 滤镜表达式
-    select_expr = "+".join(f"eq(n\\,{idx})" for idx in indices)
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
-        "-vf", f"select='{select_expr}'",
-        "-vsync", "vfr",
+        "-vf", f"fps={target_fps}",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
         "pipe:1",
     ]
@@ -225,12 +225,12 @@ def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
 
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=_VIDEO_TIMEOUT)
-        if r.returncode != 0 or len(r.stdout) < frame_size:
-            raise RuntimeError(f"ffmpeg returned {r.returncode}, got {len(r.stdout)} bytes")
+        if r.returncode != 0:
+            raise RuntimeError(f"ffmpeg returned {r.returncode}")
         raw = r.stdout
         nframes_got = len(raw) // frame_size
         frames = []
-        for i in range(nframes_got):
+        for i in range(min(nframes_got, nframes)):
             fb = raw[i * frame_size:(i + 1) * frame_size]
             frame = np.frombuffer(fb, dtype=np.uint8).reshape(height, width, 3)
             frames.append(_torch.from_numpy(frame.copy()).permute(2, 0, 1))
@@ -297,126 +297,95 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from fasteromni.pipeline import SparseInferencePipeline, PipelineResult
+from fasteromni.encoder_cache import (
+    EncoderCacheHook,
+    patch_pipeline_run_inference,
+    restore_pipeline_run_inference,
+)
 
 # ── 路径 ──────────────────────────────────────────────────
 
-VMME_ANNOTATIONS = "/root/autodl-tmp/data/Video-MME/annotations/video_mme_test.json"
-VMME_VIDEO_DIR = "/root/autodl-tmp/data/Video-MME/videos/data"
+ACTIVITYNET_ANNOTATIONS = "/root/autodl-tmp/data/ActivityNet-QA/annotations/activitynet_qa_test.json"
+ACTIVITYNET_VIDEO_DIR = "/root/autodl-tmp/data/ActivityNet-QA/videos/"
 
 
 # ── 数据加载 ──────────────────────────────────────────────
 
 @dataclass
-class VideoMMESample:
-    """Video-MME 单条 QA"""
-    video_id: str           # e.g. "001"
-    video_file_id: str      # e.g. "fFjv93ACGo8" (YouTube ID)
+class ActivityNetSample:
+    """ActivityNet-QA 单条 QA"""
+    video_name: str         # e.g. "1QIUV7WYKXg"
+    question_id: str        # e.g. "v_1QIUV7WYKXg_3"
     video_path: str
-    question_id: str
     question: str
-    options: List[str]      # ["A. ...", "B. ...", "C. ...", "D. ..."]
-    answer: str             # "A" / "B" / "C" / "D"
-    duration: str           # "short" / "medium" / "long"
-    domain: str
-    sub_category: str
-    task_type: str
+    answer: str             # e.g. "yes", "no", or other free text
+    type: str               # question type from JSON
 
 
-def load_videomme_samples(max_videos: int = 0) -> List[VideoMMESample]:
-    """加载 Video-MME 样本（仅已下载的视频）"""
-    with open(VMME_ANNOTATIONS) as f:
+def load_activitynet_samples(max_videos: int = 0) -> List[ActivityNetSample]:
+    """加载 ActivityNet-QA 样本（仅已下载的视频）"""
+    with open(ACTIVITYNET_ANNOTATIONS) as f:
         data = json.load(f)
 
-    # 已下载的视频
+    # 已下载的视频（注意：JSON 中 video_name 无 v_ 前缀，但文件名有）
     downloaded = {}
-    for fname in os.listdir(VMME_VIDEO_DIR):
+    for fname in os.listdir(ACTIVITYNET_VIDEO_DIR):
         if fname.endswith(".mp4"):
-            vid = os.path.splitext(fname)[0]
-            downloaded[vid] = os.path.join(VMME_VIDEO_DIR, fname)
+            # fname = "v_1QIUV7WYKXg.mp4" → video_name = "1QIUV7WYKXg"
+            video_name = fname[2:-4] if fname.startswith("v_") else fname[:-4]
+            downloaded[video_name] = os.path.join(ACTIVITYNET_VIDEO_DIR, fname)
 
     # 匹配
     samples = []
     matched_videos = set()
     for item in data:
-        file_id = item["videoID"]
-        if file_id not in downloaded:
+        video_name = item["video_name"]
+        if video_name not in downloaded:
             continue
 
-        matched_videos.add(file_id)
+        matched_videos.add(video_name)
         if max_videos > 0 and len(matched_videos) > max_videos:
             break
 
-        samples.append(VideoMMESample(
-            video_id=item["video_id"],
-            video_file_id=file_id,
-            video_path=downloaded[file_id],
+        samples.append(ActivityNetSample(
+            video_name=video_name,
             question_id=item["question_id"],
+            video_path=downloaded[video_name],
             question=item["question"],
-            options=item["options"],
             answer=item["answer"],
-            duration=item["duration"],
-            domain=item["domain"],
-            sub_category=item.get("sub_category", ""),
-            task_type=item.get("task_type", ""),
+            type=item.get("type", ""),
         ))
 
     return samples
 
 
-# ── Prompt 格式化 ─────────────────────────────────────────
+# ── 答案匹配 ──────────────────────────────────────────────
 
-def format_mcq_prompt(question: str, options: List[str]) -> str:
+def normalize_answer(text: str) -> str:
+    """标准化答案：小写 + 去空格"""
+    return text.strip().lower()
+
+
+def match_answer(pred: str, gt: str) -> bool:
     """
-    格式化选择题 prompt。
+    匹配预测答案和真实答案。
 
-    输出格式：
-    Question: <question>
-    A. <option_a>
-    B. <option_b>
-    C. <option_c>
-    D. <option_d>
-    Answer with the option letter only (A, B, C, or D).
+    策略：
+    1. 精确匹配（标准化后）
+    2. 如果 gt 是 pred 的子串（处理 "yes, ..." → "yes" 的情况）
     """
-    opts = "\n".join(options)
-    return (
-        f"{question}\n{opts}\n"
-        f"Answer with the option letter only (A, B, C, or D)."
-    )
+    pred_norm = normalize_answer(pred)
+    gt_norm = normalize_answer(gt)
 
+    # 精确匹配
+    if pred_norm == gt_norm:
+        return True
 
-def extract_answer_letter(output: str) -> Optional[str]:
-    """
-    从模型输出中提取选项字母 A/B/C/D。
+    # 子串匹配（gt 在 pred 中）
+    if gt_norm in pred_norm:
+        return True
 
-    策略（按优先级）：
-    1. 输出恰好是单个字母
-    2. 输出以字母开头（如 "A." 或 "A. Apples"）
-    3. 在输出中找第一个出现的 A/B/C/D
-    """
-    text = output.strip()
-
-    # 1. 单个字母
-    if text.upper() in ("A", "B", "C", "D"):
-        return text.upper()
-
-    # 2. 以字母开头
-    m = re.match(r"^([A-Da-d])[.\s,)]", text)
-    if m:
-        return m.group(1).upper()
-
-    # 3. 找第一个 A/B/C/D（作为独立字母出现）
-    m = re.search(r"\b([A-Da-d])\b", text)
-    if m:
-        letter = m.group(1).upper()
-        if letter in ("A", "B", "C", "D"):
-            return letter
-
-    # 4. 兜底：在整个文本中找
-    for ch in text.upper():
-        if ch in ("A", "B", "C", "D"):
-            return ch
-
-    return None
+    return False
 
 
 # ── 单条评估 ──────────────────────────────────────────────
@@ -425,15 +394,13 @@ def extract_answer_letter(output: str) -> Optional[str]:
 class EvalRecord:
     """单条评估记录"""
     question_id: str
-    video_file_id: str
-    duration: str
-    domain: str
-    task_type: str
-    mode: str               # "baseline" / "sparse" / "sparse_no_audio"
+    video_name: str
+    type: str
+    mode: str               # "baseline" / "sparse" / "sparse_no_audio" / "adaptive"
     keep_ratio: float = 0.0
     alpha: float = 0.0
     gt_answer: str = ""
-    pred_answer: Optional[str] = None
+    pred_answer: str = ""
     pred_raw: str = ""
     correct: bool = False
     generate_ms: float = 0.0
@@ -469,23 +436,23 @@ class _Timeout:
 
 def run_single(
     pipe: SparseInferencePipeline,
-    sample: VideoMMESample,
+    sample: ActivityNetSample,
     mode: str,
     keep_ratio: float = 0.5,
     alpha: float = 0.5,
-    max_new_tokens: int = 16,
+    max_new_tokens: int = 32,
     max_frames: int = 64,
     timeout_sec: int = 120,
+    gop_filter_mode: str = "fixed",
+    min_gop_frames: int = 10,
     min_frames: int = 8,
 ) -> EvalRecord:
     """运行单条 QA 评估"""
-    prompt = format_mcq_prompt(sample.question, sample.options)
+    prompt = sample.question
     record = EvalRecord(
         question_id=sample.question_id,
-        video_file_id=sample.video_file_id,
-        duration=sample.duration,
-        domain=sample.domain,
-        task_type=sample.task_type,
+        video_name=sample.video_name,
+        type=sample.type,
         mode=mode,
         keep_ratio=keep_ratio,
         alpha=alpha,
@@ -526,6 +493,8 @@ def run_single(
                     max_new_tokens=max_new_tokens,
                     keep_ratio=keep_ratio,
                     max_frames=max_frames,
+                    gop_filter_mode=gop_filter_mode,
+                    min_gop_frames=min_gop_frames,
                     min_frames=min_frames,
                 )
             elif mode == "adaptive":
@@ -535,7 +504,6 @@ def run_single(
                     max_frames=max_frames, min_frames=min_frames,
                     max_new_tokens=max_new_tokens,
                 )
-                record.mode = r.mode  # 记录实际策略: adaptive(top_k/uniform,var=...)
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -543,8 +511,8 @@ def run_single(
                 record.error = r.error
             else:
                 record.pred_raw = r.output_text
-                record.pred_answer = extract_answer_letter(r.output_text)
-                record.correct = (record.pred_answer == record.gt_answer)
+                record.pred_answer = r.output_text.strip()
+                record.correct = match_answer(record.pred_answer, record.gt_answer)
                 record.generate_ms = r.generate_ms
                 record.total_ms = r.total_ms
                 record.visual_tokens = r.visual_tokens
@@ -569,7 +537,7 @@ def run_single(
 import torch
 
 _CSV_FIELDNAMES = [
-    "question_id", "video_file_id", "duration", "domain", "task_type",
+    "question_id", "video_name", "type",
     "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
     "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
     "num_frames", "error", "pred_raw",
@@ -578,14 +546,17 @@ _CSV_FIELDNAMES = [
 
 def run_evaluation(
     pipe: SparseInferencePipeline,
-    samples: List[VideoMMESample],
+    samples: List[ActivityNetSample],
     mode: str,
     keep_ratio: float = 0.5,
     alpha: float = 0.5,
-    max_new_tokens: int = 16,
+    max_new_tokens: int = 32,
     max_frames: int = 64,
     incremental_csv: str = "",
+    gop_filter_mode: str = "fixed",
+    min_gop_frames: int = 10,
     min_frames: int = 8,
+    encoder_cache: bool = False,
 ) -> List[EvalRecord]:
     """运行一组评估（支持自动恢复：跳过增量 CSV 中已完成的样本）"""
     # 自动恢复：读取已有增量 CSV，跳过已完成的 question_id
@@ -615,37 +586,114 @@ def run_evaluation(
     errors = 0
     skipped = 0
 
-    for i, sample in enumerate(samples):
-        if sample.question_id in completed_qids:
-            skipped += 1
-            continue
-        rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
-                         min_frames=min_frames)
-        records.append(rec)
+    # 按视频分组以支持预取
+    from collections import OrderedDict
+    video_samples = OrderedDict()
+    for sample in samples:
+        if sample.question_id not in completed_qids:
+            if sample.video_name not in video_samples:
+                video_samples[sample.video_name] = []
+            video_samples[sample.video_name].append(sample)
 
-        # 实时写入 CSV
-        if csv_writer:
-            csv_writer.writerow({k: getattr(rec, k) for k in _CSV_FIELDNAMES})
-            csv_file.flush()
+    video_ids = list(video_samples.keys())
 
-        if rec.error:
-            errors += 1
-            status = f"ERR:{rec.error[:20]}"
-        else:
-            total += 1
-            correct += int(rec.correct)
-            mark = "✓" if rec.correct else "✗"
-            status = f"{mark} pred={rec.pred_answer} gt={rec.gt_answer}"
+    # EncoderCache setup
+    cache = None
+    if encoder_cache:
+        pipe.load_model()
+        cache = EncoderCacheHook(pipe._model, pipe._proc)
+        cache.enable()
+        print(f"  [encoder-cache] Enabled", flush=True)
 
-        # 每条都输出进度（方便 tmux 实时查看）
-        done = len(records)
-        remaining = len(samples) - skipped
-        acc = correct / total * 100 if total > 0 else 0
-        print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
-              f"| {sample.duration:7s} | {sample.video_file_id[:15]:15s} | {status}", flush=True)
+    try:
+        for vid_idx, video_id in enumerate(video_ids):
+            video_samples_list = video_samples[video_id]
 
-    if csv_file:
-        csv_file.close()
+            # 预取下一个视频
+            if vid_idx + 1 < len(video_ids):
+                next_video_id = video_ids[vid_idx + 1]
+                next_sample = video_samples[next_video_id][0]
+                if mode in ("naive_uniform", "naive_random", "naive_iframe"):
+                    strategy = {"naive_iframe": "iframe_uniform"}.get(mode, mode.replace("naive_", ""))
+                    pipe.prefetch_video(
+                        next_sample.video_path, "naive",
+                        strategy=strategy, question="", keep_ratio=keep_ratio,
+                        max_frames=max_frames, gop_filter_mode=gop_filter_mode,
+                        min_gop_frames=min_gop_frames, min_frames=min_frames
+                    )
+                elif mode == "sparse":
+                    pipe.prefetch_video(
+                        next_sample.video_path, "sparse",
+                        question="", alpha=alpha, keep_ratio=keep_ratio,
+                        max_frames=max_frames, min_frames=min_frames
+                    )
+
+            # EncoderCache: set cache key for this video
+            original_run_inference = None
+            if cache is not None:
+                cache_key = cache.make_cache_key(
+                    video_samples_list[0].video_path,
+                    max_frames=max_frames,
+                    keep_ratio=keep_ratio,
+                    selection_strategy=f"{mode}_{gop_filter_mode}_mingop{min_gop_frames}",
+                )
+                original_run_inference = patch_pipeline_run_inference(pipe, cache, cache_key)
+
+            # 处理当前视频的所有问题
+            for sample in video_samples_list:
+                rec = run_single(
+                    pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
+                    gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
+                    min_frames=min_frames,
+                )
+                records.append(rec)
+
+                # 实时写入 CSV
+                if csv_writer:
+                    csv_writer.writerow({k: getattr(rec, k) for k in _CSV_FIELDNAMES})
+                    csv_file.flush()
+
+                if rec.error:
+                    errors += 1
+                    status = f"ERR:{rec.error[:20]}"
+                else:
+                    total += 1
+                    correct += int(rec.correct)
+                    mark = "\u2713" if rec.correct else "\u2717"
+                    status = f"{mark} pred={rec.pred_answer[:20]} gt={rec.gt_answer[:20]}"
+
+                # 每条都输出进度（方便 tmux 实时查看）
+                done = len(records)
+                remaining = sum(len(v) for v in video_samples.values())
+                acc = correct / total * 100 if total > 0 else 0
+                print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
+                      f"| type={sample.type:3s} | {sample.video_name[:15]:15s} | {status}", flush=True)
+
+            # EncoderCache: restore after each video
+            if original_run_inference is not None:
+                restore_pipeline_run_inference(pipe, original_run_inference)
+                cache.clear_cache()
+
+    finally:
+        if csv_file:
+            csv_file.close()
+        if cache is not None:
+            cache.disable()
+            v_hits = cache.video_cache_hits
+            v_miss = cache.video_cache_misses
+            a_hits = cache.audio_cache_hits
+            a_miss = cache.audio_cache_misses
+            v_total = v_hits + v_miss
+            a_total = a_hits + a_miss
+            if v_total > 0:
+                print(f"\n[EncoderCache] video: {v_hits}/{v_total} ({v_hits/v_total*100:.0f}%) "
+                      f"audio: {a_hits}/{a_total} ({a_hits/a_total*100:.0f}%)", flush=True)
+
+    # 输出预取统计
+    stats = pipe.prefetch_stats()
+    if stats['hits'] + stats['misses'] > 0:
+        print(f"\n[Prefetch] hit_rate={stats['hit_rate']:.1%} hits={stats['hits']} misses={stats['misses']} "
+              f"timeouts={stats['timeouts']} evictions={stats['evictions']}", flush=True)
 
     return records
 
@@ -655,9 +703,9 @@ def run_evaluation(
 def summarize_records(records: List[EvalRecord], label: str = "") -> Dict:
     """汇总评估记录"""
     valid = [r for r in records if not r.error]
-    by_dur = defaultdict(list)
+    by_type = defaultdict(list)
     for r in valid:
-        by_dur[r.duration].append(r)
+        by_type[r.type].append(r)
 
     summary = {
         "label": label,
@@ -667,18 +715,17 @@ def summarize_records(records: List[EvalRecord], label: str = "") -> Dict:
         "overall_accuracy": sum(r.correct for r in valid) / len(valid) * 100 if valid else 0,
         "avg_generate_ms": sum(r.generate_ms for r in valid) / len(valid) if valid else 0,
         "avg_visual_tokens": sum(r.visual_tokens for r in valid) / len(valid) if valid else 0,
-        "by_duration": {},
+        "by_type": {},
     }
 
-    for dur in ["short", "medium", "long"]:
-        recs = by_dur.get(dur, [])
-        if recs:
-            summary["by_duration"][dur] = {
-                "count": len(recs),
-                "accuracy": sum(r.correct for r in recs) / len(recs) * 100,
-                "avg_generate_ms": sum(r.generate_ms for r in recs) / len(recs),
-                "avg_visual_tokens": sum(r.visual_tokens for r in recs) / len(recs),
-            }
+    for qtype in sorted(by_type.keys()):
+        recs = by_type[qtype]
+        summary["by_type"][qtype] = {
+            "count": len(recs),
+            "accuracy": sum(r.correct for r in recs) / len(recs) * 100,
+            "avg_generate_ms": sum(r.generate_ms for r in recs) / len(recs),
+            "avg_visual_tokens": sum(r.visual_tokens for r in recs) / len(recs),
+        }
 
     return summary
 
@@ -686,7 +733,7 @@ def summarize_records(records: List[EvalRecord], label: str = "") -> Dict:
 def print_summary(summaries: List[Dict]):
     """打印汇总表格"""
     print(f"\n{'='*90}")
-    print(f"VIDEO-MME EVALUATION SUMMARY")
+    print(f"ACTIVITYNET-QA EVALUATION SUMMARY")
     print(f"{'='*90}")
 
     # 总表
@@ -698,18 +745,20 @@ def print_summary(summaries: List[Dict]):
               f"{s['valid_samples']:>5} | {s['errors']:>4} | "
               f"{s['avg_generate_ms']:>9.0f} | {s['avg_visual_tokens']:>8.0f}")
 
-    # 按时长分组
-    print(f"\n{'Mode':>20} | {'short':>10} | {'medium':>10} | {'long':>10}")
-    print("-" * 60)
-    for s in summaries:
-        parts = []
-        for dur in ["short", "medium", "long"]:
-            d = s["by_duration"].get(dur)
-            if d:
-                parts.append(f"{d['accuracy']:>5.1f}%({d['count']})")
-            else:
-                parts.append(f"{'N/A':>10}")
-        print(f"{s['label']:>20} | {'  |  '.join(parts)}")
+    # 按类型分组
+    all_types = sorted(set(t for s in summaries for t in s["by_type"].keys()))
+    if all_types:
+        print(f"\n{'Mode':>20} | " + " | ".join(f"{t:>10}" for t in all_types))
+        print("-" * (25 + 14 * len(all_types)))
+        for s in summaries:
+            parts = []
+            for t in all_types:
+                d = s["by_type"].get(t)
+                if d:
+                    parts.append(f"{d['accuracy']:>5.1f}%({d['count']})")
+                else:
+                    parts.append(f"{'N/A':>10}")
+            print(f"{s['label']:>20} | {'  |  '.join(parts)}")
 
 
 # ── 保存 ──────────────────────────────────────────────────
@@ -719,21 +768,15 @@ def save_results(records: List[EvalRecord], summaries: List[Dict], out_dir: str,
     os.makedirs(out_dir, exist_ok=True)
 
     # CSV 详细记录
-    csv_path = os.path.join(out_dir, f"videomme_{tag}_details.csv")
-    fieldnames = [
-        "question_id", "video_file_id", "duration", "domain", "task_type",
-        "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
-        "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
-        "num_frames", "error", "pred_raw",
-    ]
+    csv_path = os.path.join(out_dir, f"activitynet_{tag}_details.csv")
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
         writer.writeheader()
         for r in records:
-            writer.writerow({k: getattr(r, k) for k in fieldnames})
+            writer.writerow({k: getattr(r, k) for k in _CSV_FIELDNAMES})
 
     # JSON 汇总
-    json_path = os.path.join(out_dir, f"videomme_{tag}_summary.json")
+    json_path = os.path.join(out_dir, f"activitynet_{tag}_summary.json")
     with open(json_path, "w") as f:
         json.dump(summaries, f, indent=2, ensure_ascii=False)
 
@@ -746,17 +789,15 @@ def save_results(records: List[EvalRecord], summaries: List[Dict], out_dir: str,
 # ── Main ──────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Video-MME Evaluation")
+    parser = argparse.ArgumentParser(description="ActivityNet-QA Evaluation")
     parser.add_argument("--max-videos", type=int, default=0,
                         help="Max videos to evaluate (0 = all downloaded)")
-    parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--max-frames", type=int, default=32,
                         help="Max frames for baseline (0=unlimited, 32 for 32GB GPU)")
     parser.add_argument("--keep-ratio", type=float, default=0.5)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="all",
-                        help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
                         choices=["baseline", "text_only", "audio_only", "video_only",
                                  "sparse", "sparse_no_audio",
@@ -767,29 +808,45 @@ def main():
                         help="Run ablation sweep")
     parser.add_argument("--min-frames", type=int, default=8,
                         help="Min frames floor for sparse/naive modes (prevents short-video degradation)")
-    parser.add_argument("--out-dir", default="/root/autodl-tmp/results/fasteromni/videomme")
+    parser.add_argument("--gop-filter-mode", choices=["fixed", "adaptive"], default="fixed",
+                        help="Naive iframe GOP filter mode: fixed restores scheme A, adaptive keeps scheme C")
+    parser.add_argument("--min-gop-frames", type=int, default=10,
+                        help="Fixed GOP threshold for naive iframe when --gop-filter-mode=fixed")
+    parser.add_argument("--out-dir", default="/root/autodl-tmp/results/fasteromni/activitynet")
+    parser.add_argument("--prefetch-capacity", type=int, default=2,
+                        help="Prefetch buffer capacity (0=disabled, 2=default)")
+    parser.add_argument("--encoder-cache", action="store_true", default=False,
+                        help="Enable encoder cache (reuse ViT encoding for same video)")
+    parser.add_argument("--memory-optimize", action="store_true", default=False,
+                        help="Enable memory optimization (allocator tuning + defrag hook)")
     args = parser.parse_args()
 
     random.seed(args.seed)
 
     print("=" * 70)
-    print("FasterOmni - Video-MME Evaluation")
-    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, min_frames={args.min_frames}")
+    print("FasterOmni - ActivityNet-QA Evaluation")
+    print(
+        f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, "
+        f"gop_filter_mode={args.gop_filter_mode}, min_gop_frames={args.min_gop_frames}, "
+        f"min_frames={args.min_frames}"
+    )
     print("=" * 70)
 
     # 加载样本
-    samples = load_videomme_samples(max_videos=args.max_videos)
-    if args.duration != "all":
-        samples = [s for s in samples if s.duration == args.duration]
-    n_vids = len(set(s.video_file_id for s in samples))
-    dur_counts = defaultdict(int)
+    samples = load_activitynet_samples(max_videos=args.max_videos)
+    n_vids = len(set(s.video_name for s in samples))
+    type_counts = defaultdict(int)
     for s in samples:
-        dur_counts[s.duration] += 1
+        type_counts[s.type] += 1
     print(f"Loaded {len(samples)} QA from {n_vids} videos")
-    print(f"  short={dur_counts['short']}, medium={dur_counts['medium']}, long={dur_counts['long']}")
+    print(f"  Types: {dict(type_counts)}")
 
     # 初始化
-    pipe = SparseInferencePipeline(dtype="bf16")
+    pipe = SparseInferencePipeline(
+        dtype="bf16",
+        prefetch_capacity=args.prefetch_capacity,
+        memory_optimize=args.memory_optimize,
+    )
 
     all_records = []
     all_summaries = []
@@ -813,7 +870,10 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 max_frames=args.max_frames,
                 incremental_csv=inc_csv,
+                gop_filter_mode=args.gop_filter_mode,
+                min_gop_frames=args.min_gop_frames,
                 min_frames=args.min_frames,
+                encoder_cache=args.encoder_cache,
             )
             all_records.extend(records)
             label = f"{mode}(kr={args.keep_ratio})" if mode != "baseline" else "baseline"

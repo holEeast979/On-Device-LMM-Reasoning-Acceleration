@@ -44,6 +44,7 @@ from fasteromni.modules.audio_energy import extract_audio_energy_per_gop, extrac
 from fasteromni.modules.sparse import score_gops, select_gops, get_selection_summary, ScoredGOP
 from fasteromni.modules.frame_decoder import decode_i_frames
 from fasteromni.prefetch_buffer import PrefetchRingBuffer
+from fasteromni.memory_optimizer import configure_allocator, install_defrag_hook
 
 
 def _ffprobe_info(path: str, timeout: int = 15) -> dict:
@@ -167,18 +168,25 @@ class SparseInferencePipeline:
         model_dir: str = "/root/autodl-tmp/Qwen2.5-Omni-7B",
         dtype: str = "bf16",
         prefetch_capacity: int = 0,
+        memory_optimize: bool = False,
     ):
         self.model_dir = model_dir
         self.dtype = dtype
+        self.memory_optimize = memory_optimize
         self._model = None
         self._proc = None
         self._fe = None
+        self._defrag_hook = None
         self._prefetch_buffer = PrefetchRingBuffer(capacity=prefetch_capacity)
 
     def load_model(self):
         """加载模型（只加载一次）"""
         if self._model is not None:
             return
+
+        # Layer 0: 分配器调优（必须在第一次 CUDA 分配前）
+        if self.memory_optimize:
+            configure_allocator()
 
         import common as C
         from transformers import WhisperFeatureExtractor
@@ -193,6 +201,10 @@ class SparseInferencePipeline:
         self._model = model
         self._proc = proc
         self._fe = fe
+
+        # Layer 1: ViT 编码后 defrag hook
+        if self.memory_optimize:
+            self._defrag_hook = install_defrag_hook(model, force_defrag=True)
 
     def _clear_gpu(self):
         gc.collect()

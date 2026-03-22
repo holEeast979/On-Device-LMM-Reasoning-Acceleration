@@ -831,3 +831,154 @@ K = max(min_frames, math.ceil(n_valid * kr_adaptive))  # K>=8
 - 总损失：9 小时
 
 如果一开始就记录代码版本，可以节省全部排查时间。
+
+
+---
+
+## Phase 11: 方案 A 重跑完成 + 计时修复（2026-03-18）
+
+### 时间成本
+- 方案 A 重跑（6个实验）：~9小时（3.17 夜间 → 3.18 上午）
+- 计时问题分析 + Codex review：~1小时
+- eval_cache_full.py 修复：~30分钟
+- gop_cache 重跑（2个实验）：~2.5小时（进行中）
+
+### 实验结果（方案 A, commit c8c9e7c）
+
+#### Video-MME Short (108条)
+| 方法 | generate_ms | total_ms | acc | visual_tokens |
+|------|------------|----------|-----|---------------|
+| baseline | 2161 | 5450 | 75.93% | 11522 |
+| naive_iframe | 1110 | 3466 | 75.00% | 4941 |
+| gop_cache uncached | - | 3443 | 75.00% | - |
+| gop_cache cached | - | 3013 | 75.00% | - |
+
+#### ActivityNet-QA (1000条)
+| 方法 | generate_ms | total_ms | acc | visual_tokens |
+|------|------------|----------|-----|---------------|
+| baseline | 2246 | 5480 | 41.70% | 7745 |
+| naive_iframe | 1581 | 4128 | 40.60% | 3851 |
+| gop_cache uncached | - | 4403 | 40.50% | - |
+| gop_cache cached | - | 3640 | 40.50% | - |
+
+### 发现的问题
+1. gop_cache CSV 只有 elapsed_ms（端到端），缺少 generate_ms（TTFT）
+2. ActivityNet gop_cache 用 max_new_tokens=16，baseline/naive_iframe 用 32
+3. naive_iframe 准确率 75.00% vs 之前 75.93%，差1题（正常波动）
+4. Video-MME baseline 只跑了 241/300（long 视频未完成），short 108 完整
+
+### 修复措施
+- eval_cache_full.py: 加 generate_ms 字段 + --max-new-tokens 参数
+- 重跑 2 个 gop_cache：Video-MME (max_new_tokens=16) + ActivityNet (max_new_tokens=32)
+- 结果目录：/root/autodl-tmp/results/fasteromni/scheme_a_c8c9e7c/
+
+### 导师会议记录（3.17）
+- 毕业论文确认4个技术点：稀疏化 + encoder cache + RingBuffer + 显存优化
+- RingBuffer 粗粒度流水线毕业论文够用
+- 老师建议：流水线粒度可以更细（帧级别），会议论文再做
+- 论文需加研究动机章节，TopK vs 均匀采样反直觉发现是好素材
+- 时间线：本周开发，下周写论文，4月初初稿，5月9日答辩
+
+### Phase 11.5：gop_cache 重跑完成 + 数据冻结（2026-03-18）
+
+**耗时**：~1h（2个实验自动跑完）
+
+**操作**：
+1. 修复 eval_cache_full.py：加 generate_ms 字段 + --max-new-tokens 参数
+2. 重跑 Video-MME gop_cache（max_new_tokens=16）
+3. 重跑 ActivityNet gop_cache（max_new_tokens=32）
+4. 验证数据一致性：uncached 准确率 = naive_iframe，0 mismatch
+
+**最终冻结数据（commit c8c9e7c）**：
+
+Video-MME Short (108题, 36视频):
+- baseline: acc=75.93%, gen=2161ms, total=5450ms, tokens=10739
+- naive_iframe: acc=75.00%, gen=1110ms, total=3466ms, tokens=4941
+- gop_cache uncached: acc=75.00%, gen=1114ms, total=3705ms
+- gop_cache cached: acc=75.00%, gen=766ms, total=3309ms
+
+ActivityNet-QA (1000题, 100视频):
+- baseline: acc=41.70%, gen=2246ms, total=5480ms, tokens=7745
+- naive_iframe: acc=40.60%, gen=1581ms, total=4128ms, tokens=3851
+- gop_cache uncached: acc=40.50%, gen=1548ms, total=4258ms
+- gop_cache cached: acc=40.50%, gen=1119ms, total=3731ms
+
+**加速比汇总**：
+- GOP稀疏化 generate_ms: VME 1.95x, ANet 1.42x
+- Encoder cache generate_ms: VME 1.45x, ANet 1.38x
+- 综合 generate_ms: VME 2.82x, ANet 2.01x
+- 综合 total_ms: VME 1.65x, ANet 1.47x
+
+**本地同步**：
+- Results/11_SchemeA_统一重跑_c8c9e7c/实验结果汇总.md
+- Results/11_SchemeA_统一重跑_c8c9e7c/表4-1_主实验结果.csv
+- Results/11_SchemeA_统一重跑_c8c9e7c/表4-2_编码器缓存效果.csv
+- Results/11_SchemeA_统一重跑_c8c9e7c/表4-10_完整系统性能.csv
+- Results/11_SchemeA_统一重跑_c8c9e7c/scheme_a_summary.json
+- 论文大纲_v2_20260317.md 已更新占位符（表4-1, 表4-2, 表4-10, 摘要, 项目概况, 总结）
+
+---
+
+## [3.21 归档] 从 PROGRESS.md 精简时迁移的内容
+
+### 关键设计决策（工程备忘）
+1. ⚠️ TTFT 只能用 `max_new_tokens=1` 测量
+2. ⚠️ 音频必须通过 processor 传入 (`proc(audio=, use_audio_in_video=True)`)
+3. ⚠️ Sparse 必须走 video tensor 路径（不是 image）
+4. Video-MME baseline 用 max_frames=32（64 帧 OOM）
+5. 评估主实验用 Video-MME 选择题（零歧义）
+6. alpha 默认 0.3（区间稳定，不追求单点最优）
+7. **Baseline 不走 GOP 逻辑**：直接用 qwen_omni_utils.process_mm_info() 均匀采样
+
+### 稀疏化链路三层保护机制
+1. **动态 GOP 过滤**：`adaptive_min_gop = max(2, int(median_gop_frames × 0.5))`
+2. **kr 自适应调整**：`kr_adaptive = min(keep_ratio, max_frames / n_valid)`
+3. **兜底截断**：`if len(i_frames) > max_frames: 等间隔降采样`
+
+### 待探讨问题（历史，大部分已不再 relevant）
+- AV-LRM 打分逻辑根因分析 → 已放弃，锁定 naive_iframe
+- 方差门控阈值 → 已放弃
+- Top-K 时间聚类问题 → 已放弃
+- Content-adaptive sparsification → 后续会议论文方向
+- P/B 帧利用 → 后续会议论文方向
+
+### Adaptive 策略探索结果（3.10-3.11，已放弃）
+- v2（纯 Top-K + 方差门控）：VME 72.22%，ANet 41.1%
+- v3（Stratified Top-K）：VME 71.30%，ANet 40.6%
+- v4（修复 P0 bug）：VME 75.0%（追平 naive_iframe），但 top_k 仍比 uniform 低 10pp
+- **结论**：training-free + question-agnostic 打分有天花板，不再投入
+
+### Exp 16 显存优化 Smoke Test（3.19-3.20）
+| 配置 | OOM 率 | 说明 |
+|------|--------|------|
+| baseline@64 无优化 | 82.8% | 23042 tokens 超物理上限 |
+| baseline@64 有优化 | 79.7% | 物理不够，优化无效 |
+| naive_iframe@64 有优化 | **0%** | 稀疏化+显存优化协同 |
+
+### GPT Code Review 详细发现（3.11，P0-P2 共 7 项）
+详见 STORY.md Phase 6.6（完整记录）
+
+### 研究 Scope 确认
+- 主实验：Video-MME Short (11s-2min, 300题) + ActivityNet-QA (30-180s, 8000+)
+- Limitation：MVBench (2-10s, GOP太少) + Video-MME M/L (max_frames锁死)
+- 对齐端侧论文：FreeVA, MMEdge 等普遍评估 10-180s
+
+### Naive Baselines 对比 (Short 108 题, kr=0.5)
+| 方法 | 准确率 | vs Baseline | Token |
+|------|--------|-------------|-------|
+| naive_iframe | 75.93% | =Baseline | 4939 (-54%) |
+| naive_uniform | 74.07% | -1.9pp | 4939 |
+| naive_random | 73.15% | -2.8pp | 4939 |
+| sparse (AV-LRM) | 69.44% | -6.5pp | 4939 |
+
+### Modality Baselines (300 题)
+| text_only=42.0% | audio_only=51.3% | video_only=62.2% | baseline=61.9% |
+
+### Pareto naive_iframe kr sweep (Short 108 题)
+| kr | 准确率 | 说明 |
+|----|--------|------|
+| 0.9 | 70.37% | 帧数冗余 |
+| 0.7 | 71.30% | 中等 |
+| **0.5** | **75.93%** | Sweet spot |
+| 0.3 | 69.44% | 覆盖不足 |
+| 0.2 | 68.52% | 严重欠采样 |

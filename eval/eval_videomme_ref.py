@@ -187,7 +187,7 @@ def _ffprobe_video_info(path: str, timeout: int = 15) -> dict:
 
 
 def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
-                      return_video_sample_fps: bool = False):
+                      return_video_sample_fps: bool = False, **kwargs):
     """
     安全版 fetch_video：用 ffmpeg subprocess 替代 torchvision/decord。
 
@@ -870,6 +870,8 @@ def main():
                         help="Prefetch buffer capacity (0=disabled, 2=default)")
     parser.add_argument("--encoder-cache", action="store_true", default=False,
                         help="Enable encoder cache (reuse ViT encoding for same video)")
+    parser.add_argument("--memory-optimize", action="store_true", default=False,
+                        help="Enable memory optimization (allocator tuning + defrag hook)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -895,7 +897,11 @@ def main():
     print(f"  short={dur_counts['short']}, medium={dur_counts['medium']}, long={dur_counts['long']}")
 
     # 初始化
-    pipe = SparseInferencePipeline(dtype="bf16", prefetch_capacity=args.prefetch_capacity)
+    pipe = SparseInferencePipeline(
+        dtype="bf16",
+        prefetch_capacity=args.prefetch_capacity,
+        memory_optimize=args.memory_optimize,
+    )
 
     all_records = []
     all_summaries = []
