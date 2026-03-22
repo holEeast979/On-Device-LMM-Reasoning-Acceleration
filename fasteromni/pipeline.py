@@ -122,6 +122,10 @@ class PipelineResult:
     kr_requested: float = 0.0
     kr_adaptive: float = 0.0
 
+    # 修复相关字段
+    adaptive_min_gop: int = 0
+    min_frames: int = 0
+
     # 错误
     error: Optional[str] = None
 
@@ -186,9 +190,24 @@ class SparseInferencePipeline:
         """将 PIL Image 列表转为 video tensor (T, C, H, W) float32，已 resize。"""
         # 转为 tensor 并 resize（复用 fetch_video 的 resize 逻辑）
         from qwen_omni_utils.v2_5.vision_process import (
-            IMAGE_FACTOR, VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS,
-            VIDEO_TOTAL_PIXELS, FRAME_FACTOR, smart_resize,
+            FRAME_FACTOR, smart_resize,
         )
+        # 兼容新版 qwen_omni_utils
+        try:
+            from qwen_omni_utils.v2_5.vision_process import IMAGE_FACTOR
+        except ImportError:
+            IMAGE_FACTOR = 28
+        try:
+            from qwen_omni_utils.v2_5.vision_process import (
+                VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS
+            )
+        except ImportError:
+            from qwen_omni_utils.v2_5.vision_process import (
+                VIDEO_MIN_TOKEN_NUM, VIDEO_MAX_TOKEN_NUM
+            )
+            VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+            VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+            VIDEO_TOTAL_PIXELS = 24883200
         from torchvision.transforms.functional import resize as tv_resize
         from torchvision.transforms import InterpolationMode
 
@@ -229,15 +248,19 @@ class SparseInferencePipeline:
         """统计 visual / audio / total tokens"""
         if "input_ids" not in inputs:
             return 0, 0, 0
-        from utils.profiling_utils import get_mm_token_ids_from_tokenizer
-        tok = getattr(self._proc, "tokenizer", self._proc)
-        mm = get_mm_token_ids_from_tokenizer(tok)
+        
         ids = inputs["input_ids"][0]
-        vision_ids = set(int(x) for x in mm.get("vision_special_token_ids", []) or [])
-        audio_ids = set(int(x) for x in mm.get("audio_special_token_ids", []) or [])
-        visual = sum(int((ids == tid).sum().item()) for tid in vision_ids) if vision_ids else 0
-        audio = sum(int((ids == tid).sum().item()) for tid in audio_ids) if audio_ids else 0
+        
+        # Qwen2.5-Omni 的 special token IDs（硬编码，避免依赖 profiling_utils）
+        # Vision: <|vision_bos|>=151652, <|vision_eos|>=151653, <|vision_pad|>=151654, <|IMAGE|>=151655, <|VIDEO|>=151656
+        # Audio: <|AUDIO|>=151646, <|audio_bos|>=151647, <|audio_eos|>=151648
+        vision_ids = {151652, 151653, 151654, 151655, 151656}
+        audio_ids = {151646, 151647, 151648}
+        
+        visual = sum(int((ids == tid).sum().item()) for tid in vision_ids)
+        audio = sum(int((ids == tid).sum().item()) for tid in audio_ids)
         total = int(ids.shape[-1])
+        
         return visual, audio, total
 
     def _run_inference(
@@ -338,6 +361,7 @@ class SparseInferencePipeline:
         skip_audio: bool = False,
         max_frames: int = 32,
         max_audio_sec: float = 0,
+        min_frames: int = 8,
     ) -> SelectedFrames:
         # === Step 1: GOP 解析 ===
         t0 = time.perf_counter()
@@ -354,8 +378,11 @@ class SparseInferencePipeline:
 
         # === Step 3: AV-LRM 打分 + 选择 ===
         t0 = time.perf_counter()
+        all_gop_frames = [g.num_frames for g in gop_analysis.gops]
+        median_gop_frames = float(np.median(all_gop_frames)) if all_gop_frames else 0
+        adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
         scored_gops = score_gops(gop_analysis.gops, audio_energies,
-                                 alpha=alpha, min_gop_frames=min_gop_frames)
+                                 alpha=alpha, min_gop_frames=adaptive_min_gop)
         valid_gops_list = [sg for sg in scored_gops if sg.combined_score >= 0]
         n_valid = len(valid_gops_list)
         if max_frames > 0 and n_valid > 0:
@@ -363,7 +390,8 @@ class SparseInferencePipeline:
         else:
             kr_adaptive = keep_ratio
         scored_gops = select_gops(scored_gops, keep_ratio=kr_adaptive,
-                                  variance_threshold=variance_threshold)
+                                  variance_threshold=variance_threshold,
+                                  min_frames=min_frames)
         scoring_ms = (time.perf_counter() - t0) * 1000
 
         summary = get_selection_summary(scored_gops)
@@ -393,6 +421,8 @@ class SparseInferencePipeline:
             "kr_requested": keep_ratio,
             "kr_adaptive": kr_adaptive,
             "adaptive_triggered": kr_adaptive < keep_ratio,
+            "adaptive_min_gop": adaptive_min_gop,
+            "min_frames": min_frames,
         }
 
         # 当只有 1 个有效 GOP 时，音频与 1 帧视频在 processor 中可能无法对齐
@@ -460,6 +490,7 @@ class SparseInferencePipeline:
         max_frames: int = 32,
         seed: int = 42,
         skip_audio: bool = False,
+        min_frames: int = 8,
     ) -> SelectedFrames:
         # === Step 1: GOP 解析（确定帧数 K，与 sparse 匹配）===
         t0 = time.perf_counter()
@@ -468,13 +499,17 @@ class SparseInferencePipeline:
         total_gops = gop_analysis.num_gops
         total_frames = gop_analysis.total_frames
 
-        valid_gops = [g for g in gop_analysis.gops if g.num_frames >= 10]
+        all_gop_frames = [g.num_frames for g in gop_analysis.gops]
+        median_gop_frames = float(np.median(all_gop_frames)) if all_gop_frames else 0
+        adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
+        valid_gops = [g for g in gop_analysis.gops if g.num_frames >= adaptive_min_gop]
         n_valid = len(valid_gops)
         if max_frames > 0 and n_valid > 0:
             kr_adaptive = min(keep_ratio, max_frames / n_valid)
         else:
             kr_adaptive = keep_ratio
-        K = max(1, math.ceil(n_valid * kr_adaptive))
+        K = max(min_frames, math.ceil(n_valid * kr_adaptive))
+        K = min(K, n_valid) if n_valid > 0 else min_frames
         if max_frames > 0:
             K = min(K, max_frames)
         selected_gops = K
@@ -541,6 +576,8 @@ class SparseInferencePipeline:
             "kr_requested": keep_ratio,
             "kr_adaptive": kr_adaptive,
             "adaptive_triggered": kr_adaptive < keep_ratio,
+            "adaptive_min_gop": adaptive_min_gop,
+            "min_frames": min_frames,
         }
         if not frames_pil:
             preprocess_ms = gop_parse_ms + i_frame_decode_ms
@@ -722,6 +759,7 @@ class SparseInferencePipeline:
         skip_audio: bool = False,
         max_frames: int = 32,
         max_audio_sec: float = 0,
+        min_frames: int = 8,
     ) -> PipelineResult:
         """
         稀疏化推理：GOP 解析 → AV-LRM 打分 → I 帧解码 → 推理。
@@ -743,6 +781,7 @@ class SparseInferencePipeline:
                 skip_audio=skip_audio,
                 max_frames=max_frames,
                 max_audio_sec=max_audio_sec,
+                min_frames=min_frames,
             )
 
             result.gop_parse_ms = float(selected.metadata.get("gop_parse_ms", 0.0))
@@ -752,6 +791,8 @@ class SparseInferencePipeline:
             result.total_frames = int(selected.metadata.get("total_frames", 0))
             result.total_gops = int(selected.metadata.get("total_gops", 0))
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
+            result.adaptive_min_gop = int(selected.metadata.get("adaptive_min_gop", 0))
+            result.min_frames = int(selected.metadata.get("min_frames", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
             result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
             result.kr_adaptive = float(selected.metadata.get("kr_adaptive", 0.0))
@@ -787,6 +828,7 @@ class SparseInferencePipeline:
         max_frames: int = 32,
         seed: int = 42,
         skip_audio: bool = False,
+        min_frames: int = 8,
     ) -> PipelineResult:
         """
         Naive baseline 推理：不使用 AV-LRM 打分的帧选择策略。
@@ -813,6 +855,7 @@ class SparseInferencePipeline:
                 max_frames=max_frames,
                 seed=seed,
                 skip_audio=skip_audio,
+                min_frames=min_frames,
             )
 
             result.gop_parse_ms = float(selected.metadata.get("gop_parse_ms", 0.0))
@@ -820,6 +863,8 @@ class SparseInferencePipeline:
             result.i_frame_decode_ms = float(selected.metadata.get("i_frame_decode_ms", 0.0))
             result.total_gops = int(selected.metadata.get("total_gops", 0))
             result.selected_gops = int(selected.metadata.get("selected_gops", 0))
+            result.adaptive_min_gop = int(selected.metadata.get("adaptive_min_gop", 0))
+            result.min_frames = int(selected.metadata.get("min_frames", 0))
             result.total_frames = int(selected.metadata.get("total_frames", 0))
             result.keep_ratio_actual = float(selected.metadata.get("keep_ratio_actual", 0.0))
             result.kr_requested = float(selected.metadata.get("kr_requested", 0.0))
@@ -845,6 +890,41 @@ class SparseInferencePipeline:
 
         result.total_ms = (time.perf_counter() - t_start) * 1000
         self._clear_gpu()
+        return result
+
+    def run_adaptive(
+        self,
+        video_path: str,
+        question: str,
+        keep_ratio: float = 0.5,
+        alpha: float = 0.3,
+        max_new_tokens: int = 256,
+        max_frames: int = 32,
+        min_frames: int = 8,
+        adaptive_threshold: float = 0.4,
+    ) -> PipelineResult:
+        """
+        Adaptive 推理：根据 keep_ratio 自动选择策略。
+        kr >= adaptive_threshold -> naive_iframe (coverage-dominant)
+        kr <  adaptive_threshold -> sparse/AV-LRM  (relevance-dominant)
+        """
+        if keep_ratio >= adaptive_threshold:
+            result = self.run_naive(
+                video_path=video_path, question=question,
+                strategy="iframe_uniform", keep_ratio=keep_ratio,
+                max_frames=max_frames, min_frames=min_frames,
+                max_new_tokens=max_new_tokens,
+            )
+            branch = "naive_iframe"
+        else:
+            result = self.run_sparse(
+                video_path=video_path, question=question,
+                keep_ratio=keep_ratio, alpha=alpha,
+                max_frames=max_frames, min_frames=min_frames,
+                max_new_tokens=max_new_tokens,
+            )
+            branch = "sparse"
+        result.mode = f"adaptive(kr={keep_ratio:.1f}→{branch})"
         return result
 
     def run_text_only(
