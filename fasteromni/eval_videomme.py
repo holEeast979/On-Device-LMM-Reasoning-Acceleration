@@ -486,6 +486,12 @@ def run_single(
         with _Timeout(timeout_sec):
             if mode == "baseline":
                 r = pipe.run_baseline(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
+            elif mode == "text_only":
+                r = pipe.run_text_only(sample.video_path, prompt, max_new_tokens)
+            elif mode == "audio_only":
+                r = pipe.run_audio_only(sample.video_path, prompt, max_new_tokens)
+            elif mode == "video_only":
+                r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
@@ -497,6 +503,16 @@ def run_single(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
                     skip_audio=True,
+                    max_frames=max_frames,
+                )
+            elif mode in ("naive_uniform", "naive_random", "naive_iframe"):
+                _strategy_map = {"naive_iframe": "iframe_uniform"}
+                strategy = _strategy_map.get(mode, mode.replace("naive_", ""))
+                r = pipe.run_naive(
+                    sample.video_path, prompt,
+                    strategy=strategy,
+                    max_new_tokens=max_new_tokens,
+                    keep_ratio=keep_ratio,
                     max_frames=max_frames,
                 )
             else:
@@ -556,7 +572,9 @@ def run_evaluation(
         with open(incremental_csv, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                completed_qids.add(row["question_id"])
+                # 只认有效记录（有预测结果且有生成时间），忽略垃圾数据
+                if row.get("pred_answer", "").strip() and float(row.get("generate_ms", 0)) > 0:
+                    completed_qids.add(row["question_id"])
         if completed_qids:
             print(f"  [resume] Found {len(completed_qids)} completed samples in {os.path.basename(incremental_csv)}, skipping", flush=True)
 
@@ -717,7 +735,9 @@ def main():
     parser.add_argument("--duration", choices=["short", "medium", "long", "all"], default="all",
                         help="Filter by video duration category")
     parser.add_argument("--modes", nargs="+", default=["baseline", "sparse"],
-                        choices=["baseline", "sparse", "sparse_no_audio"],
+                        choices=["baseline", "text_only", "audio_only", "video_only",
+                                 "sparse", "sparse_no_audio",
+                                 "naive_uniform", "naive_random", "naive_iframe"],
                         help="Modes to evaluate")
     parser.add_argument("--sweep", choices=["keep_ratio", "alpha", "none"], default="none",
                         help="Run ablation sweep")
