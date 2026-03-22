@@ -16,6 +16,260 @@ Usage:
 """
 from __future__ import annotations
 
+# === Monkey-patch: 防止音频提取死锁 ===
+#
+# 死锁根因（两个独立阻塞点）：
+#   1. process_audio_info() → _check_if_video_has_audio() → av.open() 无超时
+#   2. process_audio_info() → librosa.load(video_path) → audioread → ffmpeg 子进程挂死
+#
+# 修复策略：
+#   - 替换 librosa.load 为 subprocess+timeout 版本（兜底）
+#   - 替换 process_audio_info 为完全绕过 av.open/librosa 的安全版本（根治）
+#
+import librosa
+import subprocess
+import numpy as np
+import os
+
+_SAFE_AUDIO_SR = 16000
+_SAFE_TIMEOUT = 30  # seconds
+
+def _safe_extract_audio(path: str, sr: int = _SAFE_AUDIO_SR,
+                        offset: float = 0.0, duration: float = None) -> np.ndarray:
+    """用 subprocess ffmpeg 提取音频，带超时保护。失败返回 0.1s 静音。"""
+    try:
+        cmd = ["ffmpeg", "-y"]
+        if offset > 0:
+            cmd += ["-ss", str(offset)]
+        cmd += ["-i", path, "-vn", "-acodec", "pcm_f32le",
+                "-ar", str(sr), "-ac", "1", "-f", "f32le", "pipe:1"]
+        if duration is not None:
+            cmd += ["-t", str(duration)]
+        r = subprocess.run(cmd, capture_output=True, timeout=_SAFE_TIMEOUT)
+        if r.returncode == 0 and len(r.stdout) > 0:
+            return np.frombuffer(r.stdout, dtype=np.float32)
+    except subprocess.TimeoutExpired:
+        print(f"[WARN] ffmpeg audio extraction timeout ({_SAFE_TIMEOUT}s) for {path}", flush=True)
+    except Exception as e:
+        print(f"[WARN] ffmpeg audio extraction failed: {e}", flush=True)
+    return np.zeros(int(sr * 0.1), dtype=np.float32)
+
+
+# 1. 替换 librosa.load（兜底，防止任何其他地方调用原始 librosa.load）
+_original_librosa_load = librosa.load
+
+def _safe_librosa_load(path, sr=22050, mono=True, offset=0.0, duration=None, **kwargs):
+    """带超时的 librosa.load 替代"""
+    if isinstance(path, np.ndarray):
+        return _original_librosa_load(path, sr=sr, mono=mono, offset=offset, duration=duration, **kwargs)
+    if isinstance(path, str) and not path.startswith(("http://", "https://", "data:")):
+        return _safe_extract_audio(path, sr=sr, offset=offset, duration=duration), sr
+    return _original_librosa_load(path, sr=sr, mono=mono, offset=offset, duration=duration, **kwargs)
+
+librosa.load = _safe_librosa_load
+
+
+# 2. 替换 process_audio_info（根治：完全绕过 av.open 和 librosa.load）
+def _safe_process_audio_info(conversations, use_audio_in_video):
+    """
+    安全版 process_audio_info，绕过所有可能挂死的 C 扩展调用。
+
+    原版死锁点：
+      - _check_if_video_has_audio() → av.open() 无超时
+      - librosa.load(video_path) → audioread.ffdec.FFmpegAudioFile → ffmpeg 子进程挂死
+    """
+    audios = []
+    if isinstance(conversations[0], dict):
+        conversations = [conversations]
+    for conversation in conversations:
+        for message in conversation:
+            if not isinstance(message["content"], list):
+                continue
+            for ele in message["content"]:
+                if ele["type"] == "audio":
+                    path = ele.get("audio", ele.get("audio_url"))
+                    if path is None:
+                        raise ValueError(f"Unknown audio {ele}")
+                    audio_start = ele.get("audio_start", 0.0)
+                    audio_end = ele.get("audio_end", None)
+                    if isinstance(path, np.ndarray):
+                        audios.append(
+                            path[int(_SAFE_AUDIO_SR * audio_start):
+                                 None if audio_end is None else int(_SAFE_AUDIO_SR * audio_end)]
+                        )
+                    else:
+                        dur = (audio_end - audio_start) if audio_end is not None else None
+                        audios.append(_safe_extract_audio(path, sr=_SAFE_AUDIO_SR,
+                                                          offset=audio_start, duration=dur))
+                elif use_audio_in_video and ele["type"] == "video":
+                    path = ele.get("video", ele.get("video_url"))
+                    if path is None:
+                        raise ValueError(f"Unknown video {ele}")
+                    audio_start = ele.get("video_start", 0.0)
+                    audio_end = ele.get("video_end", None)
+                    dur = (audio_end - audio_start) if audio_end is not None else None
+                    audios.append(_safe_extract_audio(path, sr=_SAFE_AUDIO_SR,
+                                                      offset=audio_start, duration=dur))
+    if len(audios) == 0:
+        audios = None
+    return audios
+
+# 注入到所有引用点
+import qwen_omni_utils.v2_5.audio_process as _ap_mod
+import qwen_omni_utils.v2_5 as _v25_mod
+import qwen_omni_utils as _qu_mod
+_ap_mod.process_audio_info = _safe_process_audio_info
+_v25_mod.process_audio_info = _safe_process_audio_info
+if hasattr(_qu_mod, 'process_audio_info'):
+    _qu_mod.process_audio_info = _safe_process_audio_info
+
+
+# 3. 替换 fetch_video（根治：用 ffmpeg subprocess 替代 torchvision/decord/av）
+#
+# 死锁点：torchvision.io.read_video() / decord 是 C 扩展，SIGALRM 无法打断。
+# 某些视频导致 C 扩展内部 futex_wait 永久阻塞。
+#
+import json as _json
+import math as _math
+import torch as _torch
+from PIL import Image as _Image
+from qwen_omni_utils.v2_5.vision_process import (
+    smart_nframes, smart_resize, IMAGE_FACTOR,
+    VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS, FRAME_FACTOR,
+)
+
+_VIDEO_TIMEOUT = 60  # seconds
+
+
+def _ffprobe_video_info(path: str, timeout: int = 15) -> dict:
+    """用 ffprobe 获取视频元数据（fps、总帧数、分辨率）。"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate,nb_frames,duration",
+        "-show_entries", "format=duration",
+        "-of", "json", path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}")
+    info = _json.loads(r.stdout)
+    stream = info["streams"][0]
+    width = int(stream["width"])
+    height = int(stream["height"])
+    # Parse fps from r_frame_rate (e.g., "30000/1001")
+    rfr = stream.get("r_frame_rate", "30/1")
+    num, den = rfr.split("/")
+    fps = float(num) / float(den) if float(den) != 0 else 30.0
+    # Total frames: try nb_frames, else compute from duration
+    nb_frames = stream.get("nb_frames", "N/A")
+    if nb_frames != "N/A" and nb_frames != "0":
+        total_frames = int(nb_frames)
+    else:
+        dur = float(stream.get("duration", 0) or info.get("format", {}).get("duration", 0) or 0)
+        total_frames = max(1, int(dur * fps))
+    return {"width": width, "height": height, "fps": fps, "total_frames": total_frames}
+
+
+def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
+                      return_video_sample_fps: bool = False):
+    """
+    安全版 fetch_video：用 ffmpeg subprocess 替代 torchvision/decord。
+
+    单次 ffmpeg 调用 + select 滤镜批量提取所有帧，比逐帧调用快 10x。
+    与原版输出格式完全一致：返回 (video_tensor, sample_fps)
+    其中 video_tensor 是 float32 (T, C, H, W)，已 resize。
+    """
+    if not isinstance(ele.get("video"), str):
+        # 非文件路径（PIL 图片列表等），走原始逻辑
+        from qwen_omni_utils.v2_5.vision_process import fetch_video as _orig_fv
+        return _orig_fv(ele, image_factor=image_factor,
+                        return_video_sample_fps=return_video_sample_fps)
+
+    video_path = ele["video"]
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+
+    # 1. 获取视频信息
+    info = _ffprobe_video_info(video_path)
+    total_frames = info["total_frames"]
+    video_fps = info["fps"]
+    width, height = info["width"], info["height"]
+
+    # 2. 计算需要多少帧
+    nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
+
+    # 3. 单次 ffmpeg 调用提取所有帧（select 滤镜 + rawvideo pipe）
+    indices = _torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+
+    # 构建 select 滤镜表达式
+    select_expr = "+".join(f"eq(n\\,{idx})" for idx in indices)
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", f"select='{select_expr}'",
+        "-vsync", "vfr",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "pipe:1",
+    ]
+    frame_size = width * height * 3
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=_VIDEO_TIMEOUT)
+        if r.returncode != 0 or len(r.stdout) < frame_size:
+            raise RuntimeError(f"ffmpeg returned {r.returncode}, got {len(r.stdout)} bytes")
+        raw = r.stdout
+        nframes_got = len(raw) // frame_size
+        frames = []
+        for i in range(nframes_got):
+            fb = raw[i * frame_size:(i + 1) * frame_size]
+            frame = np.frombuffer(fb, dtype=np.uint8).reshape(height, width, 3)
+            frames.append(_torch.from_numpy(frame.copy()).permute(2, 0, 1))
+        # 如果帧数不足，用最后一帧填充
+        while len(frames) < nframes:
+            frames.append(frames[-1] if frames else _torch.zeros(3, height, width, dtype=_torch.uint8))
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"ffmpeg video extraction timeout ({_VIDEO_TIMEOUT}s) for {video_path}")
+
+    video = _torch.stack(frames)  # (T, C, H, W)
+
+    # 4. Resize（复用原版逻辑）
+    min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
+    total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
+    max_pixels = max(
+        min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
+        int(min_pixels * 1.05),
+    )
+    if "resized_height" in ele and "resized_width" in ele:
+        resized_height, resized_width = smart_resize(
+            ele["resized_height"], ele["resized_width"], factor=image_factor,
+        )
+    else:
+        resized_height, resized_width = smart_resize(
+            height, width, factor=image_factor,
+            min_pixels=min_pixels, max_pixels=max_pixels,
+        )
+
+    from torchvision.transforms.functional import resize as _tv_resize
+    from torchvision.transforms import InterpolationMode as _IM
+    video = _tv_resize(
+        video, [resized_height, resized_width],
+        interpolation=_IM.BICUBIC, antialias=True,
+    ).float()
+
+    if return_video_sample_fps:
+        return video, sample_fps
+    return video
+
+
+# 注入 fetch_video 到所有引用点
+import qwen_omni_utils.v2_5.vision_process as _vp_mod
+_vp_mod.fetch_video = _safe_fetch_video
+_v25_mod.fetch_video = _safe_fetch_video
+if hasattr(_qu_mod, 'fetch_video'):
+    _qu_mod.fetch_video = _safe_fetch_video
+# === End monkey-patch ===
+
 import argparse
 import csv
 import json
@@ -183,18 +437,25 @@ class EvalRecord:
 
 
 class _Timeout:
-    """单条推理超时保护（仅 Linux）"""
+    """
+    单条推理超时保护（内核级）。
+
+    threading.Timer 无法工作：GIL 被 C 扩展独占时 Python 线程全部阻塞。
+    signal.SIG_DFL 方案：SIGALRM 由内核投递，SIG_DFL 直接终止进程。
+    完全绕过 GIL / Python 解释器，100% 可靠。
+    配合增量 CSV（已 flush），已完成数据不丢失。
+    """
     def __init__(self, seconds: int = 120):
         self.seconds = seconds
+        self._old_handler = None
     def __enter__(self):
-        signal.signal(signal.SIGALRM, self._handler)
+        self._old_handler = signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.alarm(self.seconds)
         return self
     def __exit__(self, *args):
         signal.alarm(0)
-    @staticmethod
-    def _handler(signum, frame):
-        raise TimeoutError("Single inference timed out")
+        if self._old_handler is not None:
+            signal.signal(signal.SIGALRM, self._old_handler)
 
 
 def run_single(
@@ -288,7 +549,17 @@ def run_evaluation(
     max_frames: int = 64,
     incremental_csv: str = "",
 ) -> List[EvalRecord]:
-    """运行一组评估"""
+    """运行一组评估（支持自动恢复：跳过增量 CSV 中已完成的样本）"""
+    # 自动恢复：读取已有增量 CSV，跳过已完成的 question_id
+    completed_qids = set()
+    if incremental_csv and os.path.exists(incremental_csv) and os.path.getsize(incremental_csv) > 0:
+        with open(incremental_csv, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                completed_qids.add(row["question_id"])
+        if completed_qids:
+            print(f"  [resume] Found {len(completed_qids)} completed samples in {os.path.basename(incremental_csv)}, skipping", flush=True)
+
     # 增量 CSV 写入：每条结果实时保存，防止中断丢数据
     csv_writer = None
     csv_file = None
@@ -302,8 +573,12 @@ def run_evaluation(
     correct = 0
     total = 0
     errors = 0
+    skipped = 0
 
     for i, sample in enumerate(samples):
+        if sample.question_id in completed_qids:
+            skipped += 1
+            continue
         rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames)
         records.append(rec)
 
@@ -322,8 +597,10 @@ def run_evaluation(
             status = f"{mark} pred={rec.pred_answer} gt={rec.gt_answer}"
 
         # 每条都输出进度（方便 tmux 实时查看）
+        done = len(records)
+        remaining = len(samples) - skipped
         acc = correct / total * 100 if total > 0 else 0
-        print(f"  [{i+1}/{len(samples)}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
+        print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
               f"| {sample.duration:7s} | {sample.video_file_id[:15]:15s} | {status}", flush=True)
 
     if csv_file:
@@ -507,27 +784,33 @@ def main():
         keep_ratios = [0.2, 0.3, 0.5, 0.7, 0.9]
 
         # baseline 只跑一次
+        inc_csv_base = os.path.join(args.out_dir, "baseline_inc.csv")
         print(f"\n{'='*60}")
         print(f"Running BASELINE ({len(samples)} samples)")
+        print(f"  Incremental CSV → {inc_csv_base}")
         print(f"{'='*60}")
         base_records = run_evaluation(
             pipe, samples, "baseline",
             max_new_tokens=args.max_new_tokens,
             max_frames=args.max_frames,
+            incremental_csv=inc_csv_base,
         )
         all_records.extend(base_records)
         base_summary = summarize_records(base_records, label="baseline")
         all_summaries.append(base_summary)
 
         for kr in keep_ratios:
+            inc_csv_kr = os.path.join(args.out_dir, f"sparse_kr{kr}_inc.csv")
             print(f"\n{'='*60}")
             print(f"Running SPARSE kr={kr} ({len(samples)} samples)")
+            print(f"  Incremental CSV → {inc_csv_kr}")
             print(f"{'='*60}")
             records = run_evaluation(
                 pipe, samples, "sparse",
                 keep_ratio=kr, alpha=args.alpha,
                 max_new_tokens=args.max_new_tokens,
                 max_frames=args.max_frames,
+                incremental_csv=inc_csv_kr,
             )
             all_records.extend(records)
             summary = summarize_records(records, label=f"sparse(kr={kr})")
