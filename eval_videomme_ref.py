@@ -134,16 +134,14 @@ import math as _math
 import torch as _torch
 from PIL import Image as _Image
 from qwen_omni_utils.v2_5.vision_process import (
-    smart_nframes, smart_resize, FRAME_FACTOR, SPATIAL_MERGE_SIZE,
+    smart_nframes, smart_resize, SPATIAL_MERGE_SIZE, FRAME_FACTOR,
     VIDEO_MIN_TOKEN_NUM, VIDEO_MAX_TOKEN_NUM,
 )
-
-# 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14  # 28, must match image_patch_size * merge_size
-VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
-VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = 24883200  # match fetch_video default
-_VIDEO_TIMEOUT = 120  # seconds
+IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14
+VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+VIDEO_TOTAL_PIXELS = 24883200
+_VIDEO_TIMEOUT = 60  # seconds
 
 
 def _ffprobe_video_info(path: str, timeout: int = 15) -> dict:
@@ -177,9 +175,7 @@ def _ffprobe_video_info(path: str, timeout: int = 15) -> dict:
 
 
 def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
-                      image_patch_size: int = 14,
-                      return_video_sample_fps: bool = False,
-                      return_video_metadata: bool = False):
+                      return_video_sample_fps: bool = False):
     """
     安全版 fetch_video：用 ffmpeg subprocess 替代 torchvision/decord。
 
@@ -191,9 +187,7 @@ def _safe_fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR,
         # 非文件路径（PIL 图片列表等），走原始逻辑
         from qwen_omni_utils.v2_5.vision_process import fetch_video as _orig_fv
         return _orig_fv(ele, image_factor=image_factor,
-                        image_patch_size=image_patch_size,
-                        return_video_sample_fps=return_video_sample_fps,
-                        return_video_metadata=return_video_metadata)
+                        return_video_sample_fps=return_video_sample_fps)
 
     video_path = ele["video"]
     if video_path.startswith("file://"):
@@ -443,9 +437,6 @@ class EvalRecord:
     total_tokens: int = 0
     num_frames: int = 0
     error: str = ""
-    selection_strategy: str = ""
-    score_variance: float = 0.0
-    min_gop_frames_used: int = 0
 
 
 class _Timeout:
@@ -508,7 +499,6 @@ def run_single(
             elif mode == "video_only":
                 r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
-                # Legacy sparse mode: keep this branch for archived AV-LRM comparisons.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -516,7 +506,6 @@ def run_single(
                     min_frames=min_frames,
                 )
             elif mode == "sparse_no_audio":
-                # Legacy sparse ablation: same old path, just without audio features.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -544,7 +533,6 @@ def run_single(
                     max_frames=max_frames, min_frames=min_frames,
                     max_new_tokens=max_new_tokens,
                 )
-                record.mode = r.mode  # 记录实际策略: adaptive(top_k/uniform,var=...)
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -560,9 +548,6 @@ def run_single(
                 record.audio_tokens = r.audio_tokens
                 record.total_tokens = r.total_tokens
                 record.num_frames = r.num_frames_input
-                record.selection_strategy = r.selection_strategy
-                record.score_variance = r.score_variance
-                record.min_gop_frames_used = r.effective_min_gop if hasattr(r, "effective_min_gop") and r.effective_min_gop else r.adaptive_min_gop
 
     except torch.cuda.OutOfMemoryError:
         record.error = "OOM"
@@ -580,7 +565,12 @@ def run_single(
 
 import torch
 
-_CSV_FIELDNAMES = ["question_id", "video_file_id", "duration", "domain", "task_type", "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct", "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens", "num_frames", "error", "pred_raw", "selection_strategy", "score_variance", "min_gop_frames_used"]
+_CSV_FIELDNAMES = [
+    "question_id", "video_file_id", "duration", "domain", "task_type",
+    "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
+    "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
+    "num_frames", "error", "pred_raw",
+]
 
 
 def run_evaluation(
@@ -628,9 +618,11 @@ def run_evaluation(
         if sample.question_id in completed_qids:
             skipped += 1
             continue
-        rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
-                         gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
-                         min_frames=min_frames)
+        rec = run_single(
+            pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
+            gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
+            min_frames=min_frames,
+        )
         records.append(rec)
 
         # 实时写入 CSV
@@ -730,7 +722,12 @@ def save_results(records: List[EvalRecord], summaries: List[Dict], out_dir: str,
 
     # CSV 详细记录
     csv_path = os.path.join(out_dir, f"videomme_{tag}_details.csv")
-    fieldnames = _CSV_FIELDNAMES
+    fieldnames = [
+        "question_id", "video_file_id", "duration", "domain", "task_type",
+        "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
+        "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
+        "num_frames", "error", "pred_raw",
+    ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -773,9 +770,9 @@ def main():
     parser.add_argument("--min-frames", type=int, default=8,
                         help="Min frames floor for sparse/naive modes (prevents short-video degradation)")
     parser.add_argument("--gop-filter-mode", choices=["fixed", "adaptive"], default="fixed",
-                        help="GOP filter mode: fixed (Scheme A) or adaptive (Scheme C)")
+                        help="Naive iframe GOP filter mode: fixed restores scheme A, adaptive keeps scheme C")
     parser.add_argument("--min-gop-frames", type=int, default=10,
-                        help="Fixed GOP threshold when --gop-filter-mode=fixed")
+                        help="Fixed GOP threshold for naive iframe when --gop-filter-mode=fixed")
     parser.add_argument("--out-dir", default="/root/autodl-tmp/results/fasteromni/videomme")
     args = parser.parse_args()
 
@@ -783,7 +780,11 @@ def main():
 
     print("=" * 70)
     print("FasterOmni - Video-MME Evaluation")
-    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, gop_filter_mode={args.gop_filter_mode}, min_gop_frames={args.min_gop_frames}, min_frames={args.min_frames}")
+    print(
+        f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, "
+        f"gop_filter_mode={args.gop_filter_mode}, min_gop_frames={args.min_gop_frames}, "
+        f"min_frames={args.min_frames}"
+    )
     print("=" * 70)
 
     # 加载样本

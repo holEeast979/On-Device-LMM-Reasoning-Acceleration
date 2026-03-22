@@ -742,3 +742,92 @@ num_frames, error, pred_raw
 - **[2.17]** PROGRESS.md 创建。eval_videomme.py 优化（实时进度 + 超时 + 增量 CSV）。pipeline.py 修复（OOM: max_frames + 音频截断）。
 - **[2.16]** Video-MME 评估 Pipeline 完成。GPT Code Review 6/8 修复。ActivityNet-QA 消融完成。
 - **[2.15]** 串行 Pipeline 跑通。首次 TTFT 对比完成。
+
+---
+
+## Phase 10 详细记录：版本混乱事件（2026-03-17）
+
+### 问题发现
+
+整理实验数据时发现：
+- Video-MME naive_iframe（2.19）：75.93%，4939 tokens
+- Video-MME gop_cache（3.15）：72.22%，5007 tokens
+- 准确率差 3.7pp，token 差 +68（+1.4%）
+
+初步怀疑是 cache 导致准确率下降，但 cache 实验显示 0 mismatch。
+
+### 根因分析
+
+对比代码发现三个版本：
+
+**版本 A（commit 9390d91, 2.19）**：
+```python
+# 固定阈值
+valid_gops = [g for g in gops if g.num_frames >= 10]
+# K 保底
+K = max(1, math.ceil(n_valid * keep_ratio))
+```
+
+**版本 B（commit 8df5e7c, 3.15）**：
+```python
+# 固定阈值（改为 8）
+valid_gops = [g for g in gops if g.num_frames >= min_frames]  # min_frames=8
+# K 保底提高
+K = max(min_frames, math.ceil(n_valid * keep_ratio))  # K>=8
+```
+
+**版本 C（commit 7ceff15, 3.16）**：
+```python
+# 动态阈值
+adaptive_min_gop = max(2, int(median_gop_frames * 0.5))
+valid_gops = [g for g in gops if g.num_frames >= adaptive_min_gop]
+# K 保底
+K = max(min_frames, math.ceil(n_valid * kr_adaptive))  # K>=8
+```
+
+### 影响分析
+
+**GOP 过滤率**：
+- 版本 A（≥10）：过滤 14.6% GOP
+- 版本 B（≥8）：过滤 2.5% GOP
+- 版本 C（adaptive）：过滤率不定，平均阈值 39.8
+
+**K 保底影响**：
+- 版本 A（K≥1）：保留 keep_ratio=0.5 意图，短视频可以选很少帧
+- 版本 B/C（K≥8）：短视频（<16 GOP）稀疏化几乎失效
+
+**准确率趋势**：A(75.93%) > B(72.22%) > C(69.44%)
+
+### 解决方案
+
+**代码修复**：
+- pipeline.py 新增 `gop_filter_mode` 参数（"fixed" / "adaptive"）
+- 新增 `min_gop_frames` 参数（默认 10）
+- eval 脚本新增 CLI 参数 `--gop-filter-mode` 和 `--min-gop-frames`
+- PipelineResult 记录 `effective_min_gop` 和 `gop_filter_mode`
+
+**实验管理规范**：
+1. 每个实验目录必须有 manifest.json
+2. 目录命名带 commit hash
+3. 禁止跨版本复制数据
+4. Git tag 标记实验节点
+
+**统一重跑**：
+- 5 个实验用方案 A（fixed ≥10, K≥1）
+- Commit 85ef96e
+- 结果目录：`scheme_a_85ef96e/`
+
+### 教训
+
+1. **代码版本必须记录**：每次实验必须记录 git commit
+2. **参数变更必须文档化**：改参数默认值 = 改实验条件
+3. **禁止跨版本复制数据**：代码改了就重跑
+4. **实验目录命名规范**：带 commit hash 避免混淆
+
+### 时间成本
+
+- 排查时间：2 小时
+- 重跑时间：7 小时
+- 总损失：9 小时
+
+如果一开始就记录代码版本，可以节省全部排查时间。

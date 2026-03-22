@@ -137,9 +137,27 @@ import math as _math
 import torch as _torch
 from PIL import Image as _Image
 from qwen_omni_utils.v2_5.vision_process import (
-    smart_nframes, smart_resize, IMAGE_FACTOR,
-    VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS, FRAME_FACTOR,
+    smart_nframes, smart_resize, FRAME_FACTOR,
 )
+
+# 兼容新版 qwen_omni_utils（使用 TOKEN_NUM 而不是 PIXELS）
+try:
+    from qwen_omni_utils.v2_5.vision_process import IMAGE_FACTOR
+except ImportError:
+    IMAGE_FACTOR = 28  # ViT patch size
+
+try:
+    from qwen_omni_utils.v2_5.vision_process import (
+        VIDEO_MIN_PIXELS, VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS
+    )
+except ImportError:
+    from qwen_omni_utils.v2_5.vision_process import (
+        VIDEO_MIN_TOKEN_NUM, VIDEO_MAX_TOKEN_NUM
+    )
+    VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+    VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * IMAGE_FACTOR * IMAGE_FACTOR
+    VIDEO_TOTAL_PIXELS = 24883200  # 默认值
+
 
 _VIDEO_TIMEOUT = 60  # seconds
 
@@ -336,13 +354,16 @@ class MVBenchRecord:
     audio_tokens: int = 0
     total_tokens: int = 0
     num_frames: int = 0
+    adaptive_min_gop: int = 0
+    min_frames: int = 0
     error: str = ""
 
 
 _CSV_FIELDNAMES = [
     "sample_id", "task_type", "video_field", "mode", "keep_ratio", "alpha",
     "gt_answer", "pred_answer", "correct", "generate_ms", "total_ms",
-    "visual_tokens", "audio_tokens", "total_tokens", "num_frames", "error", "pred_raw",
+    "visual_tokens", "audio_tokens", "total_tokens", "num_frames", 
+    "adaptive_min_gop", "min_frames", "error", "pred_raw",
 ]
 
 
@@ -623,6 +644,7 @@ def run_single(
     max_new_tokens: int = 16,
     max_frames: int = 0,
     timeout_sec: int = 120,
+    min_frames: int = 8,
 ) -> MVBenchRecord:
     """运行单条 MVBench 评估。"""
     prompt = format_mvbench_prompt(sample.question, sample.candidates)
@@ -647,6 +669,7 @@ def run_single(
             elif mode == "video_only":
                 r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
+                # Legacy sparse mode: keep this branch for archived AV-LRM comparisons.
                 r = pipe.run_sparse(
                     sample.video_path,
                     prompt,
@@ -654,8 +677,10 @@ def run_single(
                     alpha=alpha,
                     keep_ratio=keep_ratio,
                     max_frames=max_frames,
+                    min_frames=min_frames,
                 )
             elif mode == "sparse_no_audio":
+                # Legacy sparse ablation: same old path, just without audio features.
                 r = pipe.run_sparse(
                     sample.video_path,
                     prompt,
@@ -664,6 +689,7 @@ def run_single(
                     keep_ratio=keep_ratio,
                     skip_audio=True,
                     max_frames=max_frames,
+                    min_frames=min_frames,
                 )
             elif mode in ("naive_uniform", "naive_random", "naive_iframe"):
                 strategy_map = {"naive_iframe": "iframe_uniform"}
@@ -675,6 +701,7 @@ def run_single(
                     max_new_tokens=max_new_tokens,
                     keep_ratio=keep_ratio,
                     max_frames=max_frames,
+                    min_frames=min_frames,
                 )
             else:
                 raise ValueError(f"Unknown mode: {mode}")
@@ -691,6 +718,8 @@ def run_single(
                 record.audio_tokens = r.audio_tokens
                 record.total_tokens = r.total_tokens
                 record.num_frames = r.num_frames_input
+                record.adaptive_min_gop = r.adaptive_min_gop
+                record.min_frames = r.min_frames
 
     except torch.cuda.OutOfMemoryError:
         record.error = "OOM"
@@ -758,6 +787,7 @@ def run_evaluation(
     max_new_tokens: int = 16,
     max_frames: int = 0,
     incremental_csv: str = "",
+    min_frames: int = 8,
 ) -> List[MVBenchRecord]:
     """运行一组评估（支持断点恢复，resume key = sample_id）。"""
     completed_ids = set()
@@ -812,6 +842,7 @@ def run_evaluation(
             alpha=alpha,
             max_new_tokens=max_new_tokens,
             max_frames=max_frames,
+            min_frames=min_frames,
         )
         records.append(rec)
         done += 1
@@ -955,6 +986,8 @@ def main():
                                  "sparse", "sparse_no_audio",
                                  "naive_uniform", "naive_random", "naive_iframe"],
                         help="Modes to evaluate")
+    parser.add_argument("--min-frames", type=int, default=8,
+                        help="Min frames floor for sparse/naive modes (prevents short-video degradation)")
     parser.add_argument("--out-dir",
                         default="/root/autodl-tmp/results/fasteromni/mvbench")
     args = parser.parse_args()
@@ -964,7 +997,7 @@ def main():
 
     print("=" * 70)
     print("FasterOmni - MVBench Evaluation")
-    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}")
+    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, min_frames={args.min_frames}")
     print("=" * 70)
 
     samples = load_mvbench_samples(
@@ -1013,6 +1046,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             max_frames=args.max_frames,
             incremental_csv=details_csv,
+            min_frames=args.min_frames,
         )
 
         label = _build_mode_label(mode, args.keep_ratio)

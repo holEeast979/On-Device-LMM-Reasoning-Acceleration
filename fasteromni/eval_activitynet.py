@@ -139,10 +139,10 @@ from qwen_omni_utils.v2_5.vision_process import (
 )
 
 # 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE
+IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14  # 28, must match image_patch_size * merge_size
 VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
 VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = VIDEO_MAX_PIXELS
+VIDEO_TOTAL_PIXELS = 24883200  # match fetch_video default (MODEL_SEQ_LEN * 28^2 * 0.9 is ~90M, but 24.8M is the standard)
 
 _VIDEO_TIMEOUT = 120  # seconds
 
@@ -382,6 +382,12 @@ class EvalRecord:
     total_tokens: int = 0
     num_frames: int = 0
     error: str = ""
+    selection_strategy: str = ""
+    score_variance: float = 0.0
+    min_gop_frames_used: int = 0
+    selection_strategy: str = ""
+    score_variance: float = 0.0
+    min_gop_frames_used: int = 0
 
 
 class _Timeout:
@@ -415,6 +421,8 @@ def run_single(
     max_new_tokens: int = 32,
     max_frames: int = 64,
     timeout_sec: int = 120,
+    gop_filter_mode: str = "fixed",
+    min_gop_frames: int = 10,
     min_frames: int = 8,
 ) -> EvalRecord:
     """运行单条 QA 评估"""
@@ -440,6 +448,7 @@ def run_single(
             elif mode == "video_only":
                 r = pipe.run_video_only(sample.video_path, prompt, max_new_tokens, max_frames=max_frames)
             elif mode == "sparse":
+                # Legacy sparse mode: keep this branch for archived AV-LRM comparisons.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -447,6 +456,7 @@ def run_single(
                     min_frames=min_frames,
                 )
             elif mode == "sparse_no_audio":
+                # Legacy sparse ablation: same old path, just without audio features.
                 r = pipe.run_sparse(
                     sample.video_path, prompt, max_new_tokens,
                     alpha=alpha, keep_ratio=keep_ratio,
@@ -463,6 +473,8 @@ def run_single(
                     max_new_tokens=max_new_tokens,
                     keep_ratio=keep_ratio,
                     max_frames=max_frames,
+                    gop_filter_mode=gop_filter_mode,
+                    min_gop_frames=min_gop_frames,
                     min_frames=min_frames,
                 )
             elif mode == "adaptive":
@@ -472,6 +484,7 @@ def run_single(
                     max_frames=max_frames, min_frames=min_frames,
                     max_new_tokens=max_new_tokens,
                 )
+                record.mode = r.mode  # 记录实际策略: adaptive(top_k/uniform,var=...)
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -487,6 +500,12 @@ def run_single(
                 record.audio_tokens = r.audio_tokens
                 record.total_tokens = r.total_tokens
                 record.num_frames = r.num_frames_input
+                record.selection_strategy = r.selection_strategy
+                record.score_variance = r.score_variance
+                record.min_gop_frames_used = r.adaptive_min_gop
+                record.selection_strategy = r.selection_strategy
+                record.score_variance = r.score_variance
+                record.min_gop_frames_used = r.adaptive_min_gop
 
     except torch.cuda.OutOfMemoryError:
         record.error = "OOM"
@@ -504,12 +523,7 @@ def run_single(
 
 import torch
 
-_CSV_FIELDNAMES = [
-    "question_id", "video_name", "type",
-    "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct",
-    "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens",
-    "num_frames", "error", "pred_raw",
-]
+_CSV_FIELDNAMES = ["question_id", "video_name", "type", "mode", "keep_ratio", "alpha", "gt_answer", "pred_answer", "correct", "generate_ms", "total_ms", "visual_tokens", "audio_tokens", "total_tokens", "num_frames", "error", "pred_raw", "selection_strategy", "score_variance", "min_gop_frames_used"]
 
 
 def run_evaluation(
@@ -521,6 +535,8 @@ def run_evaluation(
     max_new_tokens: int = 32,
     max_frames: int = 64,
     incremental_csv: str = "",
+    gop_filter_mode: str = "fixed",
+    min_gop_frames: int = 10,
     min_frames: int = 8,
 ) -> List[EvalRecord]:
     """运行一组评估（支持自动恢复：跳过增量 CSV 中已完成的样本）"""
@@ -556,6 +572,7 @@ def run_evaluation(
             skipped += 1
             continue
         rec = run_single(pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
+                         gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
                          min_frames=min_frames)
         records.append(rec)
 
@@ -696,6 +713,10 @@ def main():
                         help="Run ablation sweep")
     parser.add_argument("--min-frames", type=int, default=8,
                         help="Min frames floor for sparse/naive modes (prevents short-video degradation)")
+    parser.add_argument("--gop-filter-mode", choices=["fixed", "adaptive"], default="fixed",
+                        help="GOP filter mode: fixed (Scheme A) or adaptive (Scheme C)")
+    parser.add_argument("--min-gop-frames", type=int, default=10,
+                        help="Fixed GOP threshold when --gop-filter-mode=fixed")
     parser.add_argument("--out-dir", default="/root/autodl-tmp/results/fasteromni/activitynet")
     args = parser.parse_args()
 
@@ -703,7 +724,7 @@ def main():
 
     print("=" * 70)
     print("FasterOmni - ActivityNet-QA Evaluation")
-    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, min_frames={args.min_frames}")
+    print(f"modes={args.modes}, keep_ratio={args.keep_ratio}, alpha={args.alpha}, gop_filter_mode={args.gop_filter_mode}, min_gop_frames={args.min_gop_frames}, min_frames={args.min_frames}")
     print("=" * 70)
 
     # 加载样本
@@ -740,6 +761,8 @@ def main():
                 max_new_tokens=args.max_new_tokens,
                 max_frames=args.max_frames,
                 incremental_csv=inc_csv,
+                gop_filter_mode=args.gop_filter_mode,
+                min_gop_frames=args.min_gop_frames,
                 min_frames=args.min_frames,
             )
             all_records.extend(records)

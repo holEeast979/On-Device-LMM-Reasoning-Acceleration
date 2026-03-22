@@ -1,0 +1,248 @@
+"""
+AV-LRM 稀疏化模块
+
+实现 GOP 级稀疏化的核心算法：
+1. 打分：α·V̂ + (1-α)·Â（视觉码率 + 音频能量）
+2. 选择：Top-K（方差大时）或均匀采样（方差小时）
+
+AV-LRM = Audio-Visual Locality-aware Relevance Metric
+
+使用方式：
+    from fasteromni.modules.sparse import score_gops, select_gops
+    scored = score_gops(gops, audio_energies, alpha=0.5)
+    selected = select_gops(scored, keep_ratio=0.5)
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+
+from .gop_parser import GOPInfo
+
+
+@dataclass
+class ScoredGOP:
+    """打分后的 GOP"""
+    gop: GOPInfo
+    visual_score: float       # 归一化后的 I 帧码率分数 [0, 1]
+    audio_score: float        # 归一化后的音频能量分数 [0, 1]
+    combined_score: float     # α·V̂ + (1-α)·Â
+    selected: bool = False    # 是否被选中
+
+
+def _min_max_normalize(values: List[float]) -> List[float]:
+    """Min-Max 归一化到 [0, 1]"""
+    if not values:
+        return []
+    v_min = min(values)
+    v_max = max(values)
+    if v_max == v_min:
+        # 所有值相同，全部归一化为 0.5
+        return [0.5] * len(values)
+    return [(v - v_min) / (v_max - v_min) for v in values]
+
+
+def score_gops(
+    gops: List[GOPInfo],
+    audio_energies: List[float],
+    alpha: float = 0.5,
+    min_gop_frames: int = 10,
+) -> List[ScoredGOP]:
+    """
+    对 GOP 列表进行 AV-LRM 打分。
+
+    公式: Score(GOP_i) = α · V̂_i + (1-α) · Â_i
+
+    Args:
+        gops: GOP 列表
+        audio_energies: 与 gops 等长的音频 RMS 能量列表
+        alpha: 视觉权重（0~1），1 表示纯视觉，0 表示纯音频
+        min_gop_frames: 最小帧数阈值，低于此值的 GOP 得分设为 -1（自动排除）
+
+    Returns:
+        ScoredGOP 列表，按原始 GOP 顺序排列
+    """
+    assert len(gops) == len(audio_energies), \
+        f"GOP 数量 ({len(gops)}) 与音频能量数量 ({len(audio_energies)}) 不匹配"
+
+    # 先标记有效 GOP（过滤极短 GOP），再对有效 GOP 做归一化
+    # 避免短 GOP 的极值污染 min-max 区间
+    valid_mask = [gop.num_frames >= min_gop_frames for gop in gops]
+
+    visual_raw = [float(g.i_frame_size) for g in gops]
+    audio_raw = [float(e) for e in audio_energies]
+
+    # 只对有效 GOP 做归一化
+    valid_visual = [visual_raw[i] for i in range(len(gops)) if valid_mask[i]]
+    valid_audio = [audio_raw[i] for i in range(len(gops)) if valid_mask[i]]
+    valid_visual_norm = _min_max_normalize(valid_visual)
+    valid_audio_norm = _min_max_normalize(valid_audio)
+
+    # 映射回完整索引
+    visual_norm = [0.0] * len(gops)
+    audio_norm = [0.0] * len(gops)
+    vi = 0
+    for i in range(len(gops)):
+        if valid_mask[i]:
+            visual_norm[i] = valid_visual_norm[vi]
+            audio_norm[i] = valid_audio_norm[vi]
+            vi += 1
+
+    # 打分
+    scored_gops = []
+    for i, gop in enumerate(gops):
+        v_score = visual_norm[i]
+        a_score = audio_norm[i]
+
+        if valid_mask[i]:
+            combined = alpha * v_score + (1 - alpha) * a_score
+        else:
+            combined = -1.0  # 极短 GOP 排除
+
+        scored_gops.append(ScoredGOP(
+            gop=gop,
+            visual_score=v_score,
+            audio_score=a_score,
+            combined_score=combined,
+        ))
+
+    return scored_gops
+
+
+def select_gops(
+    scored_gops: List[ScoredGOP],
+    keep_ratio: float = 0.5,
+    variance_threshold: float = 0.05,
+    min_frames: int = 1,
+) -> List[ScoredGOP]:
+    """
+    根据打分结果选择 GOP。
+
+    策略：
+    - 计算有效 GOP 的分数方差
+    - 方差 > threshold → Top-K（选分数最高的 K 个）
+    - 方差 ≤ threshold → 均匀采样（等间隔选 K 个）
+
+    Args:
+        scored_gops: 打分后的 GOP 列表
+        keep_ratio: 保留比例 (0, 1]
+        variance_threshold: 方差阈值
+        min_frames: 最小保留 GOP 数（兜底，防止短视频帧数过少）
+
+    Returns:
+        原始 scored_gops 列表（updated .selected 字段），按时间顺序
+    """
+    # 分离有效 GOP 和被排除的 GOP
+    valid_indices = [i for i, sg in enumerate(scored_gops) if sg.combined_score >= 0]
+
+    if not valid_indices:
+        return scored_gops
+
+    K = max(min_frames, math.ceil(len(valid_indices) * keep_ratio))
+    K = min(K, len(valid_indices))
+
+    # 获取有效 GOP 的分数
+    valid_scores = [scored_gops[i].combined_score for i in valid_indices]
+    score_variance = float(np.var(valid_scores))
+
+    if score_variance > variance_threshold:
+        # Top-K: 选分数最高的 K 个
+        selected_indices = _stratified_top_k_selection(valid_indices, valid_scores, K)
+        strategy = "stratified_top_k"
+    else:
+        # 均匀采样: 等间隔选 K 个
+        selected_indices = _uniform_selection(valid_indices, K)
+        strategy = "uniform"
+
+    # 标记选中状态
+    for sg in scored_gops:
+        sg.selected = False
+    for idx in selected_indices:
+        scored_gops[idx].selected = True
+
+    return scored_gops
+
+
+def _top_k_selection(valid_indices: List[int], scores: List[float], K: int) -> List[int]:
+    """Top-K 选择：选分数最高的 K 个，返回原始索引"""
+    # 按分数降序排列
+    paired = list(zip(valid_indices, scores))
+    paired.sort(key=lambda x: x[1], reverse=True)
+    selected = [idx for idx, _ in paired[:K]]
+    return selected
+
+
+def _stratified_top_k_selection(valid_indices: List[int], scores: List[float], K: int) -> List[int]:
+    """分段 Top-K：时间轴等分 K 段，每段选分数最高的 1 个 GOP"""
+    n = len(valid_indices)
+    if K >= n:
+        return list(valid_indices)
+    segments = np.array_split(range(n), K)
+    selected = []
+    for seg in segments:
+        if len(seg) == 0:
+            continue
+        best_pos = max(seg, key=lambda p: scores[p])
+        selected.append(valid_indices[best_pos])
+    return selected
+
+
+def _uniform_selection(valid_indices: List[int], K: int) -> List[int]:
+    """均匀采样：等间隔选 K 个，覆盖首尾，返回原始索引"""
+    n = len(valid_indices)
+    if K >= n:
+        return list(valid_indices)
+    # 使用 linspace 覆盖首尾，避免前部偏置
+    positions = np.linspace(0, n - 1, K).astype(int)
+    selected = [valid_indices[p] for p in positions]
+    return selected
+
+
+def get_selection_summary(scored_gops: List[ScoredGOP]) -> dict:
+    """获取选择结果的摘要统计"""
+    valid = [sg for sg in scored_gops if sg.combined_score >= 0]
+    selected = [sg for sg in scored_gops if sg.selected]
+    excluded = [sg for sg in scored_gops if sg.combined_score < 0]
+
+    valid_scores = [sg.combined_score for sg in valid]
+    selected_scores = [sg.combined_score for sg in selected]
+
+    total_frames_all = sum(sg.gop.num_frames for sg in scored_gops)
+    total_frames_selected = sum(sg.gop.num_frames for sg in selected)
+
+    return {
+        "total_gops": len(scored_gops),
+        "valid_gops": len(valid),
+        "excluded_gops": len(excluded),
+        "selected_gops": len(selected),
+        "keep_ratio_actual": len(selected) / len(valid) if valid else 0,
+        "score_variance": float(np.var(valid_scores)) if valid_scores else 0,
+        "score_mean": float(np.mean(valid_scores)) if valid_scores else 0,
+        "selected_score_mean": float(np.mean(selected_scores)) if selected_scores else 0,
+        "total_frames": total_frames_all,
+        "selected_frames": total_frames_selected,
+        "frame_keep_ratio": total_frames_selected / total_frames_all if total_frames_all > 0 else 0,
+        # 选中的 GOP 覆盖的时间范围
+        "selected_i_frames": len(selected),  # = 选中的 I 帧数量
+    }
+
+
+def print_scoring_table(scored_gops: List[ScoredGOP], max_rows: int = 30) -> None:
+    """打印打分结果表格"""
+    print(f"\n{'GOP':>4} | {'Start(s)':>8} | {'Frames':>6} | "
+          f"{'V_score':>7} | {'A_score':>7} | {'Combined':>8} | {'Selected':>8}")
+    print("-" * 70)
+
+    for sg in scored_gops[:max_rows]:
+        g = sg.gop
+        start = f"{g.start_time_sec:.2f}" if g.start_time_sec is not None else "N/A"
+        status = "  ✓" if sg.selected else ("  ✗ (short)" if sg.combined_score < 0 else "  ✗")
+        print(f"{g.gop_index:>4} | {start:>8} | {g.num_frames:>6} | "
+              f"{sg.visual_score:>7.3f} | {sg.audio_score:>7.3f} | "
+              f"{sg.combined_score:>8.3f} | {status}")
+
+    if len(scored_gops) > max_rows:
+        print(f"  ... ({len(scored_gops) - max_rows} more GOPs)")
