@@ -52,7 +52,7 @@ RESULT_ROOT = "/root/autodl-tmp/results/fasteromni"
 
 DEFAULT_KEEP_RATIO = 0.5
 DEFAULT_MAX_FRAMES = 32
-MAX_NEW_TOKENS = 16
+DEFAULT_MAX_NEW_TOKENS = 16
 MIN_FRAMES = 8
 RANDOM_SEED = 42
 
@@ -64,6 +64,7 @@ CSV_FIELDNAMES = [
     "gt",
     "correct",
     "elapsed_ms",
+    "generate_ms",
     "visual_tokens",
     "output_text",
     "error",
@@ -260,6 +261,7 @@ def load_existing_records(csv_path: str) -> List[Dict[str, Any]]:
                     "gt": row.get("gt", ""),
                     "correct": row.get("correct", "") == "True",
                     "elapsed_ms": float(row.get("elapsed_ms", "0") or 0.0),
+                    "generate_ms": float(row.get("generate_ms", "0") or 0.0),
                     "visual_tokens": int(row.get("visual_tokens", "0") or 0),
                     "output_text": row.get("output_text", ""),
                     "error": row.get("error", ""),
@@ -305,6 +307,7 @@ def make_result_row(sample: EvalSample, result: Any, elapsed_ms: float) -> Dict[
         "gt": sample.gt_answer,
         "correct": correct,
         "elapsed_ms": elapsed_ms,
+        "generate_ms": float(getattr(result, "generate_ms", 0) or 0),
         "visual_tokens": int(getattr(result, "visual_tokens", 0) or 0),
         "output_text": output_text.strip(),
         "error": error,
@@ -320,6 +323,7 @@ def make_error_row(sample: EvalSample, error: str) -> Dict[str, Any]:
         "gt": sample.gt_answer,
         "correct": False,
         "elapsed_ms": 0.0,
+        "generate_ms": 0.0,
         "visual_tokens": 0,
         "output_text": "",
         "error": error,
@@ -343,6 +347,7 @@ def run_pipeline_once(
     mode: str,
     keep_ratio: float,
     max_frames: int,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     gop_filter_mode: str = "fixed",
     min_gop_frames: int = 10,
 ) -> Dict[str, Any]:
@@ -355,7 +360,7 @@ def run_pipeline_once(
                 question=prompt,
                 keep_ratio=keep_ratio,
                 max_frames=max_frames,
-                max_new_tokens=MAX_NEW_TOKENS,
+                max_new_tokens=max_new_tokens,
                 min_frames=MIN_FRAMES,
             )
         elif mode == "gop_cache":
@@ -365,7 +370,7 @@ def run_pipeline_once(
                 strategy="iframe_uniform",
                 keep_ratio=keep_ratio,
                 max_frames=max_frames,
-                max_new_tokens=MAX_NEW_TOKENS,
+                max_new_tokens=max_new_tokens,
                 gop_filter_mode=gop_filter_mode,
                 min_gop_frames=min_gop_frames,
                 min_frames=MIN_FRAMES,
@@ -403,6 +408,7 @@ def run_uncached(
     csv_path: str,
     keep_ratio: float,
     max_frames: int,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     gop_filter_mode: str = "fixed",
     min_gop_frames: int = 10,
 ) -> None:
@@ -425,17 +431,40 @@ def run_uncached(
     handle, writer = open_csv_writer(csv_path)
     try:
         total = len(pending)
-        for index, sample in enumerate(pending, start=1):
-            row = run_pipeline_once(
-                pipe, sample, mode,
-                keep_ratio=keep_ratio,
-                max_frames=max_frames,
-                gop_filter_mode=gop_filter_mode,
-                min_gop_frames=min_gop_frames,
-            )
-            writer.writerow(row)
-            handle.flush()
-            print_row("uncached", index, total, row)
+        # 按视频分组以支持预取
+        from collections import OrderedDict
+        video_pending = OrderedDict()
+        for sample in pending:
+            if sample.video_id not in video_pending:
+                video_pending[sample.video_id] = []
+            video_pending[sample.video_id].append(sample)
+        video_ids = list(video_pending.keys())
+
+        index = 0
+        for vid_idx, video_id in enumerate(video_ids):
+            # 预取下一个视频
+            if vid_idx + 1 < len(video_ids):
+                next_vid = video_ids[vid_idx + 1]
+                next_sample = video_pending[next_vid][0]
+                select_fn_name = "naive" if mode == "gop_cache" else "sparse"
+                prefetch_kwargs = dict(question="", keep_ratio=keep_ratio, max_frames=max_frames, min_frames=MIN_FRAMES)
+                if mode == "gop_cache":
+                    prefetch_kwargs.update(strategy="iframe_uniform", gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames)
+                pipe.prefetch_video(next_sample.video_path, select_fn_name, **prefetch_kwargs)
+
+            for sample in video_pending[video_id]:
+                index += 1
+                row = run_pipeline_once(
+                    pipe, sample, mode,
+                    keep_ratio=keep_ratio,
+                    max_frames=max_frames,
+                    max_new_tokens=max_new_tokens,
+                    gop_filter_mode=gop_filter_mode,
+                    min_gop_frames=min_gop_frames,
+                )
+                writer.writerow(row)
+                handle.flush()
+                print_row("uncached", index, total, row)
     finally:
         handle.close()
 
@@ -448,6 +477,7 @@ def run_cached(
     csv_path: str,
     keep_ratio: float,
     max_frames: int,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     gop_filter_mode: str = "fixed",
     min_gop_frames: int = 10,
 ) -> None:
@@ -475,10 +505,22 @@ def run_cached(
     current = 0
 
     try:
-        for video_id in _sorted_video_ids(groups):
+        sorted_ids = _sorted_video_ids(groups)
+        for vid_idx, video_id in enumerate(sorted_ids):
             samples = [sample for sample in groups[video_id] if sample.question_id not in completed]
             if not samples:
                 continue
+
+            # 预取下一个视频
+            if vid_idx + 1 < len(sorted_ids):
+                next_vid = sorted_ids[vid_idx + 1]
+                next_samples = [s for s in groups[next_vid] if s.question_id not in completed]
+                if next_samples:
+                    select_fn_name = "naive" if mode == "gop_cache" else "sparse"
+                    prefetch_kwargs = dict(question="", keep_ratio=keep_ratio, max_frames=max_frames, min_frames=MIN_FRAMES)
+                    if mode == "gop_cache":
+                        prefetch_kwargs.update(strategy="iframe_uniform", gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames)
+                    pipe.prefetch_video(next_samples[0].video_path, select_fn_name, **prefetch_kwargs)
 
             cache_key = cache.make_cache_key(
                 samples[0].video_path,
@@ -497,6 +539,7 @@ def run_cached(
                         pipe, sample, mode,
                         keep_ratio=keep_ratio,
                         max_frames=max_frames,
+                        max_new_tokens=max_new_tokens,
                         gop_filter_mode=gop_filter_mode,
                         min_gop_frames=min_gop_frames,
                     )
@@ -515,6 +558,7 @@ def summarize_results(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     valid = [row for row in rows if not row.get("error")]
     accuracy = (sum(row["correct"] for row in valid) / len(valid) * 100.0) if valid else 0.0
     avg_latency_ms = (sum(row["elapsed_ms"] for row in valid) / len(valid)) if valid else 0.0
+    avg_generate_ms = (sum(row.get("generate_ms", 0) for row in valid) / len(valid)) if valid else 0.0
 
     by_query: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for row in valid:
@@ -522,7 +566,7 @@ def summarize_results(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
 
     print(f"\n{label}:", flush=True)
     print(f"  Accuracy: {accuracy:.1f}% ({sum(row['correct'] for row in valid)}/{len(valid)})", flush=True)
-    print(f"  Avg latency: {avg_latency_ms:.0f}ms", flush=True)
+    print(f"  Avg latency: {avg_latency_ms:.0f}ms (generate: {avg_generate_ms:.0f}ms)", flush=True)
     print(f"  Errors: {len(rows) - len(valid)}", flush=True)
 
     per_query_breakdown: Dict[str, Dict[str, float]] = {}
@@ -530,19 +574,22 @@ def summarize_results(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
         query_rows = by_query[query_index]
         query_accuracy = sum(row["correct"] for row in query_rows) / len(query_rows) * 100.0
         query_avg_ms = sum(row["elapsed_ms"] for row in query_rows) / len(query_rows)
+        query_avg_gen_ms = sum(row.get("generate_ms", 0) for row in query_rows) / len(query_rows)
         print(
-            f"  Query {query_index}: acc={query_accuracy:.1f}% avg={query_avg_ms:.0f}ms (n={len(query_rows)})",
+            f"  Query {query_index}: acc={query_accuracy:.1f}% avg={query_avg_ms:.0f}ms gen={query_avg_gen_ms:.0f}ms (n={len(query_rows)})",
             flush=True,
         )
         per_query_breakdown[str(query_index)] = {
             "accuracy": query_accuracy,
             "avg_latency_ms": query_avg_ms,
+            "avg_generate_ms": query_avg_gen_ms,
             "count": len(query_rows),
         }
 
     return {
         "accuracy": accuracy,
         "avg_latency_ms": avg_latency_ms,
+        "avg_generate_ms": avg_generate_ms,
         "count": len(valid),
         "error_count": len(rows) - len(valid),
         "per_query_breakdown": per_query_breakdown,
@@ -595,6 +642,7 @@ def save_summary(
     cached_rows: List[Dict[str, Any]],
     keep_ratio: float,
     max_frames: int,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     gop_filter_mode: str = "fixed",
     min_gop_frames: int = 10,
 ) -> None:
@@ -643,7 +691,7 @@ def save_summary(
         "max_frames": max_frames,
         "gop_filter_mode": gop_filter_mode,
         "min_gop_frames": min_gop_frames,
-        "max_new_tokens": MAX_NEW_TOKENS,
+        "max_new_tokens": max_new_tokens,
         "uncached": uncached_summary,
         "cached": cached_summary,
         "speedup": speedup,
@@ -676,8 +724,12 @@ def parse_args() -> argparse.Namespace:
                         help="Naive iframe GOP filter mode: fixed restores scheme A, adaptive keeps scheme C")
     parser.add_argument("--min-gop-frames", type=int, default=10,
                         help="Fixed GOP threshold for gop_cache when --gop-filter-mode=fixed")
+    parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS,
+                        help="Max new tokens for generation (16 for MCQ, 32 for open-ended)")
     parser.add_argument("--out-dir", type=str, default="",
                         help="Override the default output directory")
+    parser.add_argument("--prefetch-capacity", type=int, default=2,
+                        help="Prefetch buffer capacity (0=disabled, 2=default)")
     return parser.parse_args()
 
 
@@ -702,13 +754,14 @@ def main() -> int:
     print(f"Selected {video_count} videos, {question_count} questions", flush=True)
     print(
         f"keep_ratio={args.keep_ratio} max_frames={args.max_frames} "
+        f"max_new_tokens={args.max_new_tokens} "
         f"gop_filter_mode={args.gop_filter_mode} min_gop_frames={args.min_gop_frames}",
         flush=True,
     )
     print(f"Output dir: {output_dir}", flush=True)
 
     print("\n[2] Loading pipeline...", flush=True)
-    pipe = SparseInferencePipeline()
+    pipe = SparseInferencePipeline(prefetch_capacity=args.prefetch_capacity)
     pipe.load_model()
     print("Pipeline loaded.", flush=True)
 
@@ -723,6 +776,7 @@ def main() -> int:
         pipe, ab_group, args.mode, uncached_csv,
         keep_ratio=args.keep_ratio,
         max_frames=args.max_frames,
+        max_new_tokens=args.max_new_tokens,
         gop_filter_mode=args.gop_filter_mode,
         min_gop_frames=args.min_gop_frames,
     )
@@ -730,6 +784,7 @@ def main() -> int:
         pipe, ab_group, args.mode, args.dataset, cached_csv,
         keep_ratio=args.keep_ratio,
         max_frames=args.max_frames,
+        max_new_tokens=args.max_new_tokens,
         gop_filter_mode=args.gop_filter_mode,
         min_gop_frames=args.min_gop_frames,
     )
@@ -739,6 +794,7 @@ def main() -> int:
         pipe, ba_group, args.mode, args.dataset, cached_csv,
         keep_ratio=args.keep_ratio,
         max_frames=args.max_frames,
+        max_new_tokens=args.max_new_tokens,
         gop_filter_mode=args.gop_filter_mode,
         min_gop_frames=args.min_gop_frames,
     )
@@ -746,6 +802,7 @@ def main() -> int:
         pipe, ba_group, args.mode, uncached_csv,
         keep_ratio=args.keep_ratio,
         max_frames=args.max_frames,
+        max_new_tokens=args.max_new_tokens,
         gop_filter_mode=args.gop_filter_mode,
         min_gop_frames=args.min_gop_frames,
     )
@@ -757,6 +814,7 @@ def main() -> int:
         output_dir, args.mode, args.dataset, uncached_rows, cached_rows,
         keep_ratio=args.keep_ratio,
         max_frames=args.max_frames,
+        max_new_tokens=args.max_new_tokens,
         gop_filter_mode=args.gop_filter_mode,
         min_gop_frames=args.min_gop_frames,
     )

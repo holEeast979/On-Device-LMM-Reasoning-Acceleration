@@ -139,10 +139,10 @@ from qwen_omni_utils.v2_5.vision_process import (
 )
 
 # 计算像素常量（从 token 数推导）
-IMAGE_FACTOR = SPATIAL_MERGE_SIZE * 14  # 28, must match image_patch_size * merge_size
+IMAGE_FACTOR = SPATIAL_MERGE_SIZE
 VIDEO_MIN_PIXELS = VIDEO_MIN_TOKEN_NUM * 28 * 28
 VIDEO_MAX_PIXELS = VIDEO_MAX_TOKEN_NUM * 28 * 28
-VIDEO_TOTAL_PIXELS = 24883200
+VIDEO_TOTAL_PIXELS = VIDEO_MAX_PIXELS
 
 _VIDEO_TIMEOUT = 120  # seconds
 
@@ -297,6 +297,11 @@ if SCRIPT_ROOT not in sys.path:
     sys.path.insert(0, SCRIPT_ROOT)
 
 from fasteromni.pipeline import SparseInferencePipeline, PipelineResult
+from fasteromni.encoder_cache import (
+    EncoderCacheHook,
+    patch_pipeline_run_inference,
+    restore_pipeline_run_inference,
+)
 
 # ── 路径 ──────────────────────────────────────────────────
 
@@ -551,6 +556,7 @@ def run_evaluation(
     gop_filter_mode: str = "fixed",
     min_gop_frames: int = 10,
     min_frames: int = 8,
+    encoder_cache: bool = False,
 ) -> List[EvalRecord]:
     """运行一组评估（支持自动恢复：跳过增量 CSV 中已完成的样本）"""
     # 自动恢复：读取已有增量 CSV，跳过已完成的 question_id
@@ -580,40 +586,114 @@ def run_evaluation(
     errors = 0
     skipped = 0
 
-    for i, sample in enumerate(samples):
-        if sample.question_id in completed_qids:
-            skipped += 1
-            continue
-        rec = run_single(
-            pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
-            gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
-            min_frames=min_frames,
-        )
-        records.append(rec)
+    # 按视频分组以支持预取
+    from collections import OrderedDict
+    video_samples = OrderedDict()
+    for sample in samples:
+        if sample.question_id not in completed_qids:
+            if sample.video_name not in video_samples:
+                video_samples[sample.video_name] = []
+            video_samples[sample.video_name].append(sample)
 
-        # 实时写入 CSV
-        if csv_writer:
-            csv_writer.writerow({k: getattr(rec, k) for k in _CSV_FIELDNAMES})
-            csv_file.flush()
+    video_ids = list(video_samples.keys())
 
-        if rec.error:
-            errors += 1
-            status = f"ERR:{rec.error[:20]}"
-        else:
-            total += 1
-            correct += int(rec.correct)
-            mark = "✓" if rec.correct else "✗"
-            status = f"{mark} pred={rec.pred_answer[:20]} gt={rec.gt_answer[:20]}"
+    # EncoderCache setup
+    cache = None
+    if encoder_cache:
+        pipe.load_model()
+        cache = EncoderCacheHook(pipe._model, pipe._proc)
+        cache.enable()
+        print(f"  [encoder-cache] Enabled", flush=True)
 
-        # 每条都输出进度（方便 tmux 实时查看）
-        done = len(records)
-        remaining = len(samples) - skipped
-        acc = correct / total * 100 if total > 0 else 0
-        print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
-              f"| type={sample.type:3s} | {sample.video_name[:15]:15s} | {status}", flush=True)
+    try:
+        for vid_idx, video_id in enumerate(video_ids):
+            video_samples_list = video_samples[video_id]
 
-    if csv_file:
-        csv_file.close()
+            # 预取下一个视频
+            if vid_idx + 1 < len(video_ids):
+                next_video_id = video_ids[vid_idx + 1]
+                next_sample = video_samples[next_video_id][0]
+                if mode in ("naive_uniform", "naive_random", "naive_iframe"):
+                    strategy = {"naive_iframe": "iframe_uniform"}.get(mode, mode.replace("naive_", ""))
+                    pipe.prefetch_video(
+                        next_sample.video_path, "naive",
+                        strategy=strategy, question="", keep_ratio=keep_ratio,
+                        max_frames=max_frames, gop_filter_mode=gop_filter_mode,
+                        min_gop_frames=min_gop_frames, min_frames=min_frames
+                    )
+                elif mode == "sparse":
+                    pipe.prefetch_video(
+                        next_sample.video_path, "sparse",
+                        question="", alpha=alpha, keep_ratio=keep_ratio,
+                        max_frames=max_frames, min_frames=min_frames
+                    )
+
+            # EncoderCache: set cache key for this video
+            original_run_inference = None
+            if cache is not None:
+                cache_key = cache.make_cache_key(
+                    video_samples_list[0].video_path,
+                    max_frames=max_frames,
+                    keep_ratio=keep_ratio,
+                    selection_strategy=f"{mode}_{gop_filter_mode}_mingop{min_gop_frames}",
+                )
+                original_run_inference = patch_pipeline_run_inference(pipe, cache, cache_key)
+
+            # 处理当前视频的所有问题
+            for sample in video_samples_list:
+                rec = run_single(
+                    pipe, sample, mode, keep_ratio, alpha, max_new_tokens, max_frames,
+                    gop_filter_mode=gop_filter_mode, min_gop_frames=min_gop_frames,
+                    min_frames=min_frames,
+                )
+                records.append(rec)
+
+                # 实时写入 CSV
+                if csv_writer:
+                    csv_writer.writerow({k: getattr(rec, k) for k in _CSV_FIELDNAMES})
+                    csv_file.flush()
+
+                if rec.error:
+                    errors += 1
+                    status = f"ERR:{rec.error[:20]}"
+                else:
+                    total += 1
+                    correct += int(rec.correct)
+                    mark = "\u2713" if rec.correct else "\u2717"
+                    status = f"{mark} pred={rec.pred_answer[:20]} gt={rec.gt_answer[:20]}"
+
+                # 每条都输出进度（方便 tmux 实时查看）
+                done = len(records)
+                remaining = sum(len(v) for v in video_samples.values())
+                acc = correct / total * 100 if total > 0 else 0
+                print(f"  [{done}/{remaining}] acc={acc:.1f}% ({correct}/{total}) err={errors} "
+                      f"| type={sample.type:3s} | {sample.video_name[:15]:15s} | {status}", flush=True)
+
+            # EncoderCache: restore after each video
+            if original_run_inference is not None:
+                restore_pipeline_run_inference(pipe, original_run_inference)
+                cache.clear_cache()
+
+    finally:
+        if csv_file:
+            csv_file.close()
+        if cache is not None:
+            cache.disable()
+            v_hits = cache.video_cache_hits
+            v_miss = cache.video_cache_misses
+            a_hits = cache.audio_cache_hits
+            a_miss = cache.audio_cache_misses
+            v_total = v_hits + v_miss
+            a_total = a_hits + a_miss
+            if v_total > 0:
+                print(f"\n[EncoderCache] video: {v_hits}/{v_total} ({v_hits/v_total*100:.0f}%) "
+                      f"audio: {a_hits}/{a_total} ({a_hits/a_total*100:.0f}%)", flush=True)
+
+    # 输出预取统计
+    stats = pipe.prefetch_stats()
+    if stats['hits'] + stats['misses'] > 0:
+        print(f"\n[Prefetch] hit_rate={stats['hit_rate']:.1%} hits={stats['hits']} misses={stats['misses']} "
+              f"timeouts={stats['timeouts']} evictions={stats['evictions']}", flush=True)
 
     return records
 
@@ -733,6 +813,10 @@ def main():
     parser.add_argument("--min-gop-frames", type=int, default=10,
                         help="Fixed GOP threshold for naive iframe when --gop-filter-mode=fixed")
     parser.add_argument("--out-dir", default="/root/autodl-tmp/results/fasteromni/activitynet")
+    parser.add_argument("--prefetch-capacity", type=int, default=2,
+                        help="Prefetch buffer capacity (0=disabled, 2=default)")
+    parser.add_argument("--encoder-cache", action="store_true", default=False,
+                        help="Enable encoder cache (reuse ViT encoding for same video)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -756,7 +840,7 @@ def main():
     print(f"  Types: {dict(type_counts)}")
 
     # 初始化
-    pipe = SparseInferencePipeline(dtype="bf16")
+    pipe = SparseInferencePipeline(dtype="bf16", prefetch_capacity=args.prefetch_capacity)
 
     all_records = []
     all_summaries = []
@@ -783,6 +867,7 @@ def main():
                 gop_filter_mode=args.gop_filter_mode,
                 min_gop_frames=args.min_gop_frames,
                 min_frames=args.min_frames,
+                encoder_cache=args.encoder_cache,
             )
             all_records.extend(records)
             label = f"{mode}(kr={args.keep_ratio})" if mode != "baseline" else "baseline"

@@ -43,6 +43,7 @@ from fasteromni.modules.gop_parser import parse_gops, GOPAnalysis
 from fasteromni.modules.audio_energy import extract_audio_energy_per_gop, extract_audio_from_video
 from fasteromni.modules.sparse import score_gops, select_gops, get_selection_summary, ScoredGOP
 from fasteromni.modules.frame_decoder import decode_i_frames
+from fasteromni.prefetch_buffer import PrefetchRingBuffer
 
 
 def _ffprobe_info(path: str, timeout: int = 15) -> dict:
@@ -165,12 +166,14 @@ class SparseInferencePipeline:
         self,
         model_dir: str = "/root/autodl-tmp/Qwen2.5-Omni-7B",
         dtype: str = "bf16",
+        prefetch_capacity: int = 0,
     ):
         self.model_dir = model_dir
         self.dtype = dtype
         self._model = None
         self._proc = None
         self._fe = None
+        self._prefetch_buffer = PrefetchRingBuffer(capacity=prefetch_capacity)
 
     def load_model(self):
         """加载模型（只加载一次）"""
@@ -195,6 +198,34 @@ class SparseInferencePipeline:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def prefetch_video(self, video_path: str, select_fn_name: str = "naive", **kwargs) -> None:
+        """提交后台预取任务（在GPU推理期间预取下一个视频的CPU预处理结果）
+
+        Args:
+            video_path: 下一个视频的路径
+            select_fn_name: 帧选择函数名 ("naive", "sparse", "baseline")
+            **kwargs: 传给对应 _select_* 方法的参数
+        """
+        fn_map = {
+            "naive": self._select_naive,
+            "sparse": self._select_sparse,
+            "baseline": self._select_baseline,
+        }
+        select_fn = fn_map.get(select_fn_name)
+        if select_fn is None:
+            return
+        kwargs['video_path'] = video_path
+        self._prefetch_buffer.submit_prefetch(video_path, select_fn, kwargs)
+
+    def prefetch_stats(self) -> dict:
+        """返回预取缓冲区统计信息"""
+        return self._prefetch_buffer.stats()
+
+    def __del__(self):
+        """清理预取缓冲区（防止后台线程泄漏）"""
+        if hasattr(self, '_prefetch_buffer'):
+            self._prefetch_buffer.shutdown(wait=False)
 
     def _sync_devices(self):
         if torch.cuda.is_available():
@@ -821,7 +852,7 @@ class SparseInferencePipeline:
         t_start = time.perf_counter()
 
         try:
-            selected = self._select_sparse(
+            select_kwargs = dict(
                 video_path=video_path,
                 question=question,
                 alpha=alpha,
@@ -833,6 +864,8 @@ class SparseInferencePipeline:
                 max_audio_sec=max_audio_sec,
                 min_frames=min_frames,
             )
+            selected = self._prefetch_buffer.get(
+                video_path, self._select_sparse, select_kwargs)
 
             result.gop_parse_ms = float(selected.metadata.get("gop_parse_ms", 0.0))
             result.audio_extract_ms = float(selected.metadata.get("audio_extract_ms", 0.0))
@@ -906,7 +939,7 @@ class SparseInferencePipeline:
         t_start = time.perf_counter()
 
         try:
-            selected = self._select_naive(
+            select_kwargs = dict(
                 video_path=video_path,
                 question=question,
                 strategy=strategy,
@@ -918,6 +951,8 @@ class SparseInferencePipeline:
                 min_gop_frames=min_gop_frames,
                 min_frames=min_frames,
             )
+            selected = self._prefetch_buffer.get(
+                video_path, self._select_naive, select_kwargs)
 
             result.gop_parse_ms = float(selected.metadata.get("gop_parse_ms", 0.0))
             result.audio_extract_ms = float(selected.metadata.get("audio_extract_ms", 0.0))

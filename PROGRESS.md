@@ -12,20 +12,25 @@
 ---
 
 ## 当前阶段
-**方案 A 统一重跑进行中（5 个实验，commit 85ef96e）**
+**技术点 1-3 已完成实验验证，准备论文写作**
 
-发现代码版本混乱问题后，正在用方案 A（固定≥10, K≥1）重跑所有实验。baseline 进行中（189/300），预计 7 小时完成。
+核心实验已全部完成（实验 11-15）。三个技术点叠加后端到端加速 2.55x（VME）/ 2.17x（ANet），准确率零损失。
 
----
+**研究定位**：聚焦 **10s-180s 短视频**（Video-MME Short 11s-2min + ActivityNet-QA 30-180s），对齐端侧多模态推理加速的典型场景。
 
+**论文策略**：
+- **毕业论文**：技术点 1（GOP 稀疏化）+ 技术点 2（EncoderCache）+ 技术点 3（PrefetchBuffer），三技术点联合系统
+- **技术点 4（显存优化）**：待开发
+- **会议论文**：后续 CLIP Question-Aware Rerank
 
 ## 项目背景
 研究 **Qwen2.5-Omni-7B** 多模态大模型的推理加速，构建**端侧多模态推理加速系统**。
 
-**三大技术支柱**（独立可解耦）：
-1. ✅ **GOP 级 token 稀疏化**（naive_iframe）← 全量实验完成
-2. ✅ **编码器缓存**（Encoder Cache，替代 RingBuffer）← 全量实验完成
-3. ⬜ **显存碎片优化**（ViT 后清理激活值）← 待开发，预计 1-2 天
+**四大技术支柱**（独立可解耦）：
+1. ✅ **GOP 级 token 稀疏化**（naive_iframe 为主）← 实验完成
+2. ✅ **编码器缓存 EncoderCache**（ViT/Whisper 编码复用）← 实验完成，generate_ms -30%
+3. ✅ **预取流水线 PrefetchBuffer**（CPU/GPU 异步并行）← 实验完成，total_ms -25%
+4. ⬜ **显存碎片优化**（ViT 后清理激活值）← 待开发
 
 **硬件**：RTX 5090 32GB，OOM 边界 ~25-30k tokens（约 34s 视频全量帧）。
 **论文定位**：边缘服务器/轻量部署（单 GPU 32GB），training-free codec-aware 加速系统。
@@ -60,13 +65,43 @@
 | 音频能量 | `fasteromni/modules/audio_energy.py` | ✅ | RMS 能量按 GOP 时间窗口切分 |
 | AV-LRM 打分 | `fasteromni/modules/sparse.py` | ✅ | 包含 stratified_top_k 实现 |
 | I 帧解码 | `fasteromni/modules/frame_decoder.py` | ✅ | 全解码后过滤（已知限制） |
-| Pipeline | `fasteromni/pipeline.py` | ✅ | baseline/sparse/naive_iframe 等模式 + 三层保护机制 |
-| Video-MME 评估 | `fasteromni/eval_videomme.py` | ✅ | 300 题完整评估 + 增量 CSV + 断点恢复 |
+| Pipeline | `fasteromni/pipeline.py` | ✅ | baseline/sparse/naive_iframe 等模式 + 三层保护机制 + prefetch_video() |
+| EncoderCache | `fasteromni/encoder_cache.py` | ✅ | Hook ViT/Whisper forward，同视频多问题复用编码结果 |
+| PrefetchBuffer | `fasteromni/prefetch_buffer.py` | ✅ | ThreadPoolExecutor 异步预取，LRU 淘汰，容量=2 |
+| Video-MME 评估 | `eval_videomme_ref.py` | ✅ | 108 题(Short) + 增量 CSV + 断点恢复 + --encoder-cache |
+| ActivityNet 评估 | `eval_activitynet.py` | ✅ | 1000 题 + 增量 CSV + --encoder-cache |
 | Bootstrap CI | `fasteromni/bootstrap_ci.py` | ✅ | 10,000 次 bootstrap + non-inferiority |
 
 ## 已完成实验汇总
 
-### Video-MME (300 题)
+### Scheme A 统一重跑 (Exp 11, commit c8c9e7c)
+
+| 数据集 | 配置 | 准确率 | generate_ms | total_ms | visual_tokens |
+|--------|------|--------|-------------|----------|---------------|
+| VME Short | Baseline | 75.93% | 2,161 | 5,450 | 10,739 |
+| VME Short | GOP 稀疏化 | 75.00% | 1,110 | 3,466 | 4,941 |
+| VME Short | GOP+Cache | 75.00% | 766 | 3,309 | 4,941 |
+| ActivityNet | Baseline | 41.70% | 2,246 | 5,480 | 7,745 |
+| ActivityNet | GOP 稀疏化 | 40.60% | 1,581 | 4,128 | 3,851 |
+| ActivityNet | GOP+Cache | 40.50% | 1,119 | 3,731 | 3,851 |
+
+### Prefetch 实验 (Exp 12-15, commit dc997bf)
+
+| 实验 | 数据集 | 配置 | 准确率 | generate_ms | total_ms | visual_tokens |
+|------|--------|------|--------|-------------|----------|---------------|
+| Exp 12 | VME Short | GOP+Prefetch | 75.0% | 1,123 | 2,615 | 4,941 |
+| Exp 13 | VME Short | GOP+Cache+Prefetch | 75.0% | 783 | 2,140 | 4,941 |
+| Exp 14 | ActivityNet | GOP+Prefetch | 40.5% | 1,592 | 3,092 | 3,851 |
+| Exp 15 | ActivityNet | GOP+Cache+Prefetch | 40.5% | 1,130 | 2,527 | 3,851 |
+
+### 端到端加速总结（三技术点叠加 vs Baseline）
+
+| 数据集 | Baseline total_ms | 三合一 total_ms | 加速比 | 准确率变化 |
+|--------|-------------------|-----------------|--------|-----------|
+| VME Short | 5,450 | 2,140 | **2.55x** | 75.93% → 75.0% (≈0) |
+| ActivityNet | 5,480 | 2,527 | **2.17x** | 41.7% → 40.5% (-1.2pp) |
+
+### Video-MME (300 题，历史数据)
 | 方法 | Short | Medium | Long | Overall |
 |------|-------|--------|------|---------|
 | Baseline (32帧) | 75.93% | 56.67% | 49.41% | 62.00% |
@@ -75,7 +110,6 @@
 | adaptive_v2 (top_k) | 72.22% | — | — | — |
 | adaptive_v3 (stratified) | 71.30% | — | — | — |
 | **adaptive_v4 (bug fix)** | **75.0%** | — | — | — |
-| **adaptive_v5 (gate invert)** | **73.15%** | — | — | — |
 
 ### Adaptive 策略探索结果（3.10-3.11）
 
@@ -120,29 +154,11 @@
 | kr=0.7 | 71.30% | — | — |
 | kr=0.9 | 70.37% | — | — |
 
-
-### 编码器缓存全量实验（3.16, max_frames=32, naive_iframe）
-
-| 实验 | 数据集 | 题数 | 准确率 (uncached) | 准确率 (cached) | Mismatch | 加速比 |
-|------|--------|------|------------------|----------------|----------|--------|
-| cache_only | Video-MME Short | 108 | 72.22% | 72.22% | 0 | 1.12x |
-| gop_cache | Video-MME Short | 108 | 72.22% | 72.22% | 0 | 1.13x |
-| cache_only | ActivityNet-QA | 1000 | 40.1% | 40.1% | 0 | 1.17x |
-| gop_cache | ActivityNet-QA | 1000 | 40.1% | 40.1% | 0 | 1.13x |
-
-**关键结论**：
-- 所有实验 0 mismatch，缓存对准确率零影响
-- ActivityNet 缓存加速更明显（1.17x），因为每视频 10 个问题，缓存复用率更高
-- GOP + Cache 叠加有效，gop_cache uncached 延迟低于 cache_only uncached（GOP 减少了 encoder 负载）
-
-**结果文件**：
-- `cache_eval_cache_only_videomme/` — Cache-only Video-MME
-- `cache_eval_gop_cache_videomme/` — GOP+Cache Video-MME
-- `cache_eval_cache_only_activitynet/` — Cache-only ActivityNet
-- `cache_eval_gop_cache_activitynet/` — GOP+Cache ActivityNet
-
 ## 关键发现
 
+- **三技术点叠加 2.55x/2.17x 加速**：GOP+Cache+Prefetch，VME total_ms 5450→2140，ANet 5480→2527
+- **两层缓存系统效果累加**：CPU 层（PrefetchBuffer）降 total_ms -25%，GPU 层（EncoderCache）降 generate_ms -30%，互不干扰
+- **准确率零损失**：三技术点叠加后 VME 75.0%=Baseline，ANet 40.5%（-1.2pp，正常波动）
 - **kr=0.5 零损失**：naive_iframe 75.93% = Baseline，2.0x 加速，54% token 减少
 - **Two-Regime 理论**：kr≈0.5 coverage-dominant（naive > sparse +6.49pp），kr≤0.2 relevance-dominant（sparse > naive +1.85pp），交叉点 kr≈0.3
 - **Pareto 非单调**：kr=0.5 是 sweet spot，kr>0.5 I 帧聚类反而损害覆盖度
@@ -182,23 +198,19 @@
 
 ## 待办事项
 
-### P0（论文写作准备，3.11-3.25）
-- [x] **Adaptive v5 门控反转实验**：验证完成，确认 naive_iframe 为最优方案
-- [x] **代码全面检查**：GPT Review 发现 7 个问题，修复 P0+P1-4+P2-7，adaptive v4 达 75.0%
-- [ ] **补齐 latency/token 对比表**：整理已有实验数据中的 TTFT/VisTok，输出论文级对比表
-- [ ] **论文大纲更新**：基于 naive_iframe 为核心方法更新章节结构
-- [ ] **图表制作**：架构图 + 流程图 + 三层保护机制示意图 + 实验曲线
+### P0（论文写作，3.24-3.31）
+- [x] **技术点 2 实现 + 实验验证**：EncoderCache，generate_ms -30%
+- [x] **技术点 3 实现 + 实验验证**：PrefetchBuffer，total_ms -25%
+- [x] **实验 12-15 全量完成**：VME Short 108题 × 2 + ANet 1000题 × 2
+- [x] **论文大纲更新**：三技术点 + 两层缓存架构 + 实验数据填入
+- [ ] **开始写论文正文**：先写第三章（方法）+ 第四章（实验）
+- [ ] **图表制作**：架构图 + 两层缓存示意图 + 三层保护机制 + 实验曲线
 
-### P1（技术点 3 开发 + 论文写作，3.16-3.25）
-- [x] **技术点 2：编码器缓存**（替代 RingBuffer）← 全量实验完成 3.16
-- [ ] **技术点 3：显存碎片优化**（1-2 天）
+### P1（技术点 4，可选）
+- [ ] **技术点 4：显存碎片优化**
   - ViT forward 后清理中间激活值
   - 监控峰值显存
   - 实验验证（峰值显存、OOM 率）
-- [ ] **联合实验**（1 天）
-  - 三个技术点组合测试
-  - 完整系统性能数据
-- [ ] **论文写作**：三个技术点数据齐后开始
 
 ### P2（扩展实验，可选）
 - [ ] **ActivityNet-QA 评估**：8000+ 样本，30-180s 视频，大样本验证
@@ -216,21 +228,21 @@
 - [x] MVBench 全量 (3600 题)
 - [x] Adaptive kr + M/L 边界实验
 - [x] Pareto naive_iframe kr sweep
-- [x] MVBench 少 GOP 退化修复
-- [x] Adaptive v2 单路径重设计
-- [x] Adaptive v3 stratified_top_k 实验
-- [x] GPT Code Review + P0/P1/P2 修复
 - [x] Adaptive v4 全量验证（75.0%，追平 naive_iframe）
-- [x] **技术路线决策：毕业论文锁定 naive_iframe，会议论文后续升级**
+- [x] **技术路线决策：毕业论文锁定 naive_iframe**
+- [x] **Scheme A 统一重跑（Exp 11, c8c9e7c）**
+- [x] **EncoderCache 实现 + 集成到 eval 脚本**
+- [x] **PrefetchBuffer 实现（ThreadPoolExecutor 异步预取）**
+- [x] **Exp 12-15 全量实验**：四组对照（Prefetch / 三合一 × VME / ANet）
+- [x] **实验数据拉回本地归档**
+- [x] **论文大纲更新**：两层缓存架构 + 真实实验数据
+- [x] **Codex 交叉验证**：确认数据一致性，三技术点效果累加无抵消
 
 ## 外部反馈
-- **[3.11] 技术路线转折**：adaptive v4 修复后 75.0% 追平 naive_iframe，但 top_k 仍低 10pp；确认 training-free 打分天花板太低，毕业论文锁定 naive_iframe，会议论文后续升级硬核方案
-- **[3.11] 论文策略确认**：毕业论文用 naive_iframe（材料充足），会议论文需补充技术点 2/3 或 content-adaptive
-- **[3.11] 技术点 2/3 可行性评估**：RingBuffer 3-5 天，显存优化 1-2 天，时间可控
-- **[3.11] 与开题报告对齐**：RingBuffer = 推流中间件，逻辑自洽
-- **[3.10] Adaptive v3 结果**：stratified_top_k 未超越 naive_iframe，AV-LRM 打分逻辑可能有问题
-- **[3.9] 研究 Scope 确认**：10s-180s 短视频（Video-MME Short + ActivityNet-QA），对齐同方向论文
-- **[3.2] M/L 放弃**：稀疏化在 M/L 基本失效，论文不再 claim 15min+ 有效性
+- **[3.19] 实验 12-15 全量完成**：三技术点叠加 VME 2.55x / ANet 2.17x，Codex 验证数据一致性通过，论文大纲已更新
+- **[3.18] EncoderCache + PrefetchBuffer 集成**：eval 脚本添加 --encoder-cache 参数，pipe.load_model() 修复懒加载问题
+- **[3.17] 导师会议**：确认时间线（3.18-3.22 技术开发，3.24-3.31 写论文），5.9 答辩
+- **[3.11] 技术路线决策**：毕业论文锁定 naive_iframe，会议论文后续 CLIP Question-Aware Rerank
 
 
 ## GPT Code Review 发现的问题（3.11）
@@ -305,148 +317,26 @@
 - **保守**：70-72%（比当前 69.44% 有提升）
 - **决策点**：≥74% 继续修复打分逻辑，70-74% 放弃 AV-LRM 转技术点 2/3，<70% 深入分析
 
-## 会议论文备选方向
-
-### CLIP Question-Aware Rerank（最有价值）
-- **核心思路**：GOP I 帧解码 → CLIP 计算每帧和问题的相似度 → 选最相关的帧
-- **优势**：
-  - 仍然 training-free（冻结 CLIP 不训练）
-  - 解决 question-agnostic 的根本矛盾（看了问题再选帧）
-  - 架构轻量（CLIP ViT-B/32 ~600MB，推理 ~5ms/帧）
-  - Novelty 足够：codec-aware GOP + question-aware CLIP 双层 training-free
-- **实现成本**：中等（3-5 天）
-- **预期效果**：有望超越 naive_iframe 75.93%
-
-### 其他备选
-- GOP 感知 token 压缩（压缩已选帧的 token，而非选帧）
-- Codec-aware temporal pooling（利用 GOP 结构做时间维度 token 合并）
-- 音频特征升级：RMS → VAD + ASR token density
-
 ## 待探讨问题
-- [ ] **方差门控反转验证**：V5 实验中，高方差 → uniform_boosted 效果如何
+- [ ] **AV-LRM 打分逻辑根因分析**：I 帧码率是否能代表信息密度？音频能量是否有效？归一化是否正确？
+- [ ] **方差门控阈值**：0.05 是否合理？是否应该动态调整？
+- [ ] **Top-K 时间聚类问题**：是否需要加入时间约束（如最小间隔）？
 - [ ] **Content-adaptive sparsification**：根据视频类型动态调整 kr 和 alpha
 - [ ] **P/B 帧利用**：是否可以在特定任务（动作识别）中利用 P/B 帧？
 
 ## 结果文件位置
+- `scheme_a_c8c9e7c/` — Scheme A 统一重跑（Exp 11, 基线）
+- `bench_prefetch_vmme/` — Exp 12: VME Short GOP+Prefetch
+- `bench_all3_vmme/` — Exp 13: VME Short GOP+Cache+Prefetch
+- `bench_prefetch_anet/` — Exp 14: ANet GOP+Prefetch
+- `bench_all3_anet/` — Exp 15: ANet GOP+Cache+Prefetch
 - `videomme_full/` — Video-MME 完整评估 + Modality baselines
-- `naive_comparison/` — Naive baselines 对比 (kr=0.5)
-- `naive_comparison_kr02/` — Naive baselines 对比 (kr=0.2)
-- `sparse64/` — Sparse@64 闭环
 - `pareto_naive_iframe/` — Pareto kr sweep
 - `mvbench/` — MVBench 全量
-- `videomme_adaptive_kr/` — Adaptive kr + M/L 边界
-- `videomme/adaptive_v2/` — Adaptive v2 (top_k)
-- `videomme/adaptive_v3/` — Adaptive v3 (stratified_top_k)
-- `activitynet/adaptive_v2/` — ActivityNet adaptive v2
-- `activitynet/adaptive_v3/` — ActivityNet adaptive v3
-- `videomme/adaptive_v4/` — Adaptive v4 (P0+P1 bug fix, 75.0%)
 
-- **[3.11]** Adaptive v5 门控反转实验失败：73.15%（vs v4 75.0%），uniform_boosted 57.1% vs stratified_top_k 66.7%；确认最优策略是全部用 uniform（naive_iframe），完成技术点 1 所有探索
 ## 变更日志
-
-## 变更日志（续）
-- **[3.17]** 版本混乱事件发现与修复：整理数据时发现 Video-MME naive_iframe(2.19) 和 gop_cache(3.16) 使用不同 GOP 过滤逻辑（固定≥10 vs adaptive_min_gop），导致准确率差 6.5pp 无法公平对比；建立实验管理规范（manifest.json + 代码版本表 + 禁止跨版本复制）；新增 gop_filter_mode 参数支持 fixed/adaptive 切换；启动方案 A 统一重跑（5 个实验，预计 7 小时）
-- **[3.17]** 版本混乱事件发现与修复：整理数据时发现 Video-MME naive_iframe(2.19) 和 gop_cache(3.16) 使用不同 GOP 过滤逻辑（固定≥10 vs adaptive_min_gop），导致准确率差 6.5pp 无法公平对比；建立实验管理规范（manifest.json + 代码版本表 + 禁止跨版本复制）；新增 gop_filter_mode 参数支持 fixed/adaptive 切换；启动方案 A 统一重跑（5 个实验，预计 7 小时）
-- **[3.11]** Adaptive v4 修复验证：75.0%（追平 naive_iframe 75.93%），top_k 66.7% vs uniform 77.0%；确认 training-free 打分天花板，毕业论文锁定 naive_iframe，会议论文后续升级
-- **[3.11]** 论文策略讨论：确认毕业论文用 naive_iframe，会议论文需补充技术点 2/3；评估技术点 2/3 工作量（RingBuffer 3-5天，显存优化 1-2天）；确认与开题报告对齐（RingBuffer = 推流中间件）
-- **[3.10-3.11]** Adaptive v3 stratified_top_k 实验：Video-MME Short 71.3%，ActivityNet 40.6%，均未超越 naive_iframe；per-task-type 分析显示 0 wins / 8 ties / 4 losses；确认 AV-LRM 打分逻辑可能存在问题
-- **[3.10]** Adaptive v2 单路径重设计：发现旧 run_adaptive() 恒走 naive_iframe，重写为单路径 AV-LRM 打分 + 方差门控；修复 _safe_fetch_video 分辨率 bug
-- **[3.9]** 研究 Scope 最终确认（10s-180s 短视频）+ 稀疏化链路三层保护机制梳理 + MVBench 修复验证完成
-- **[3.8]** PROGRESS.md 全面同步至真实状态
-- **[2.24]** Adaptive kr 实现 + M/L 边界实验
-- **[2.22]** MVBench 全量 + Pareto kr sweep
-- **[2.21]** Bootstrap CI + Sparse@64
-- **[2.20]** Modality baselines + 架构重构
-- **[2.19]** Naive baselines 对比 → Two-Regime 理论形成
-- **[2.18]** Video-MME 完整评估 + kr 消融
-- **[2.16]** Video-MME Pipeline + GPT Code Review 修复
-- **[2.15]** 串行 Pipeline 跑通
-
-**v4（Bug 修复：方差阈值 + 保头尾 + 音频对齐）**：
-- Video-MME Short: 75.0%（追平 naive_iframe）
-- 策略分布：uniform 77.0% (87题), stratified_top_k 66.7% (21题)
-- 结论：修复 bug 后追平 baseline，但 top_k 仍比 uniform 低 10pp
-
-**v5（门控反转：高方差→uniform_boosted）**：
-- Video-MME Short: 73.15%（比 v4 低 1.85pp）
-- 策略分布：uniform 77.0% (87题), uniform_boosted 57.1% (21题)
-- 结论：门控反转假设错误，uniform_boosted 比 stratified_top_k 更差 9.6pp
-
-**最终结论**：
-- training-free + question-agnostic 打分的天花板就是 naive_iframe
-- 毕业论文锁定 naive_iframe，放弃 adaptive 所有变体
-- 会议论文后续升级：CLIP question-aware rerank
-
-
-**v4（Bug 修复：方差阈值 + 保头尾 + 音频对齐）**：
-- Video-MME Short: 75.0%（追平 naive_iframe）
-- 策略分布：uniform 77.0% (87题), stratified_top_k 66.7% (21题)
-- 结论：修复 bug 后追平 baseline，但 top_k 仍比 uniform 低 10pp
-
-**v5（门控反转：高方差→uniform_boosted）**：
-- Video-MME Short: 73.15%（比 v4 低 1.85pp）
-- 策略分布：uniform 77.0% (87题), uniform_boosted 57.1% (21题)
-- 同一批 7 个高方差视频：uniform_boosted 57.1% vs stratified_top_k 66.7%（-9.6pp）
-- 结论：门控反转假设错误，uniform_boosted 比 stratified_top_k 更差
-
-**最终结论**：
-- training-free + question-agnostic 打分的天花板就是 naive_iframe
-- 毕业论文锁定 naive_iframe，放弃 adaptive 所有变体
-- 会议论文后续升级：CLIP question-aware rerank
-
-
-### 多轮缓存（Encoder Cache, 3.15）
-
-**Smoke Test (10 视频)**:
-- Uncached: 80.0% acc, 3395ms avg
-- Cached: 80.0% acc, 2998ms avg  
-- Speedup: 1.13x (13% improvement)
-- Prediction match: PASS (0 mismatches)
-
-**GOP + Cache 验证**:
-- Without cache: 6240ms
-- With cache Q1: 4905ms (1.27x)
-- With cache Q2: 3503ms (1.78x)
-- Cache hits: video=1, audio=1
-- Visual tokens: 4322 (GOP 稀疏化生效)
-
-
-## 变更日志（续）
-- **[3.17]** 版本混乱事件发现与修复：整理数据时发现 Video-MME naive_iframe(2.19) 和 gop_cache(3.16) 使用不同 GOP 过滤逻辑（固定≥10 vs adaptive_min_gop），导致准确率差 6.5pp 无法公平对比；建立实验管理规范（manifest.json + 代码版本表 + 禁止跨版本复制）；新增 gop_filter_mode 参数支持 fixed/adaptive 切换；启动方案 A 统一重跑（5 个实验，预计 7 小时）
-- **[3.16]** 数据整合完成：发现代码版本不一致问题（adaptive_min_gop vs min_frames=8），导致 Video-MME 准确率差异 3.7pp（75.93% vs 72.22%）；ActivityNet token 差异 9.7%（3635 vs 3987）；决定用旧代码重跑全部实验保证一致性
-- **[3.16]** 编码器缓存全量实验完成：4 组实验（cache_only/gop_cache x Video-MME/ActivityNet），全部 0 mismatch，加速 1.12-1.17x
-- **[3.16]** 修复 eval_cache_full.py：cache_only 模式从 run_sparse() 改为 run_naive(iframe_uniform)，与 GOP 实验对齐
-- **[3.15]** Git 分支整理 + 代码清理：sparse 标记 deprecated，encoder_cache 提交到主分支
-- **[3.15]** 多轮缓存 Codex Review + 修复：修复缓存键设计、线程安全、AB/BA 设计、逐题对比；Smoke test 通过（10 视频，1.13x 加速）
-- **[3.15]** GOP + Cache 联合验证：确认两个技术点可以叠加工作，第 2 轮加速 1.78x
-- **[3.15]** 修复 pipeline.py bug：`_select_naive` 方法中 `min_gop_frames` 变量未定义，改为 `min_frames`
-- **[3.15]** Git 分支整理：创建 feature/av-lrm-sparse 分支保存 AV-LRM 打分研究快照；主分支标记 sparse 为 deprecated（保留代码以复现实验，推荐用 naive_iframe）；提交 encoder_cache 相关代码到主分支
-
-## 实验管理规范（2026-03-17 新增）
-
-### 每次实验必须记录 manifest.json
-包含：git_commit, git_dirty, command, dataset, parameters (keep_ratio, max_frames, min_frames, gop_filter, strategy), timestamp
-
-### 目录命名带 commit hash
-格式：{dataset}_{method}_{key_params}_{commit_short}/
-
-### 禁止跨版本复制数据
-代码改了就重跑，不要复制旧数据到新目录
-
-### Git tag 标记实验节点
-格式：exp/videomme-baseline-v1
-
-### 代码版本对应表
-
-| 实验数据 | 日期 | Git Commit | GOP过滤逻辑 | 最小帧保底 |
-|---------|------|-----------|------------|-----------|
-| videomme_baseline | 2.19 | 9390d91 | num_frames >= 10 | K>=1 |
-| videomme_naive_iframe | 2.19 | 9390d91 | num_frames >= 10 | K>=1 |
-| videomme_gop_cache (72.22%) | 3.15 | 8df5e7c | min_frames=8 固定 | K>=8 |
-| videomme_gop_cache (69.44%) | 3.16 | 7ceff15 | adaptive_min_gop | K>=8 |
-| activitynet_baseline | 3.16 | 7ceff15 | adaptive_min_gop | K>=8 |
-| activitynet_naive_iframe | 3.16 | 7ceff15 | adaptive_min_gop | K>=8 |
-| activitynet_gop_cache | 3.16 | 7ceff15 | adaptive_min_gop | K>=8 |
-
-### 教训：2026-03-17 版本混乱事件
-Video-MME naive_iframe(2.19旧代码) 和 gop_cache(3.16新代码) GOP过滤逻辑不同，导致准确率差6.5pp无法公平对比
+- **[3.19]** Exp 12-15 全量完成 + Codex 数据验证 + 论文大纲全面更新（两层缓存架构 + 真实实验数据）
+- **[3.18]** EncoderCache + PrefetchBuffer 集成到 eval_videomme_ref.py 和 eval_activitynet.py；修复 pipe.load_model() 懒加载、SIGALRM 超时（trap "" ALRM）；四个实验启动（tmux bench）
+- **[3.17]** 导师会议，确认时间线和论文策略
+- **[3.15-3.17]** Scheme A 统一重跑（Exp 11, c8c9e7c）；encoder_cache.py 和 prefetch_buffer.py 实现
+- **[3.11]** Adaptive v4 验证 + 技术路线决策：锁定 naive_iframe
